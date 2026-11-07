@@ -51,6 +51,7 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 - (NSArray<VSCodeEntry *> *)entries;
 - (void)addCode:(NSString *)code source:(NSString *)source;
 - (void)removeAll;
+- (void)checkClipboard;
 @end
 
 // ---- Layer Info ----

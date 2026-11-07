@@ -175,14 +175,6 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
         VSLog(@"Clipboard check error: %@", e.reason);
     }
 }
-    if (trimmed.length < 6 || trimmed.length > 512) return;
-
-    NSArray<VSCodeEntry *> *current = [self entries];
-    if (current.count > 0 && [current[0].code isEqualToString:trimmed]) {
-        return; // Đã là code mới nhất
-    }
-    [self addCode:trimmed source:@"Clipboard"];
-}
 
 - (NSArray<NSDictionary *> *)rawEntries {
     id raw = [[NSUserDefaults standardUserDefaults] arrayForKey:kVSCodesKey];
