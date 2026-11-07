@@ -6,36 +6,57 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Compile VSToolbox.dylib with native Xcode clang
+      - name: Install system dependencies
         run: |
-          mkdir -p tweak/dist
-          cd tweak
-          xcrun -sdk iphoneos clang++ \
-            -arch arm64 \
-            -dynamiclib \
-            -fobjc-arc \
-            -miphoneos-version-min=15.0 \
-            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-            -framework UIKit \
-            -framework Foundation \
-            -framework CoreGraphics \
-            -framework QuartzCore \
-            -Wno-deprecated-declarations \
-            -Wno-unused-function \
-            -Wno-undeclared-selector \
-            -Wno-nullability-completeness \
-            -undefined dynamic_lookup \
-            -install_name @rpath/VSToolbox.dylib \
-            -o dist/VSToolbox.dylib \
-            VSCore.mm VSUI.mm Tweak.mm
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential curl git xz-utils libtinfo6 zstd
 
-          ls -lh dist/VSToolbox.dylib
-          file dist/VSToolbox.dylib
+      - name: Setup Theos and iOS Toolchain
+        run: |
+          set -eux
+          # 1. Clone Theos
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+
+          # 2. Download and install toolchain
+          mkdir -p /tmp/tc "$HOME/theos/toolchain/linux/iphone"
+          curl -fSL --retry 3 https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz -o /tmp/toolchain.tar.xz
+          tar -xJf /tmp/toolchain.tar.xz -C /tmp/tc
+          
+          # Inspect extracted structure
+          echo "=== Content of /tmp/tc ==="
+          ls -la /tmp/tc
+          
+          # Find bin directory containing clang
+          CLANG_PATH=$(find /tmp/tc -name "clang" -type f -o -name "clang" -type l | head -n 1)
+          echo "Found clang at: $CLANG_PATH"
+          TC_BIN_DIR=$(dirname "$CLANG_PATH")
+          TC_ROOT=$(dirname "$TC_BIN_DIR")
+          
+          cp -a "$TC_ROOT"/* "$HOME/theos/toolchain/linux/iphone/"
+          ls -la "$HOME/theos/toolchain/linux/iphone/bin"
+
+          # 3. Download iOS SDK
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/sdks
+          cd /tmp/sdks
+          git sparse-checkout set iPhoneOS16.5.sdk
+          mkdir -p "$HOME/theos/sdks"
+          cp -a iPhoneOS16.5.sdk "$HOME/theos/sdks/"
+
+      - name: Build dylib
+        run: |
+          export THEOS="$HOME/theos"
+          make -C tweak dylib
+
+      - name: Inspect dylib
+        run: |
+          dylib=tweak/dist/VSToolbox.dylib
+          ls -lh "$dylib"
+          file "$dylib"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
