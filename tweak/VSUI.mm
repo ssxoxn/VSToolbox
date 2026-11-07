@@ -265,25 +265,16 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     cfg.titleAlignment = UIButtonConfigurationTitleAlignmentLeading;
 
     UIColor *titleColor = color ?: VSPinkDeep();
-    cfg.titleTextAttributesTransformer = ^NSAttributedString *(NSAttributedString *incoming) {
-        NSMutableAttributedString *out =
-            [[NSMutableAttributedString alloc] initWithAttributedString:incoming];
-        [out addAttribute:NSFontAttributeName
-                    value:[UIFont systemFontOfSize:16 weight:UIFontWeightSemibold]
-                    range:NSMakeRange(0, out.length)];
-        [out addAttribute:NSForegroundColorAttributeName value:titleColor
-                    range:NSMakeRange(0, out.length)];
+    cfg.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> *(NSDictionary<NSAttributedStringKey, id> *incoming) {
+        NSMutableDictionary *out = [incoming mutableCopy] ?: [NSMutableDictionary dictionary];
+        out[NSFontAttributeName] = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+        out[NSForegroundColorAttributeName] = titleColor;
         return out;
     };
-    cfg.subtitleTextAttributesTransformer = ^NSAttributedString *(NSAttributedString *incoming) {
-        NSMutableAttributedString *out =
-            [[NSMutableAttributedString alloc] initWithAttributedString:incoming];
-        [out addAttribute:NSFontAttributeName
-                    value:[UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular]
-                    range:NSMakeRange(0, out.length)];
-        [out addAttribute:NSForegroundColorAttributeName
-                    value:[VSText() colorWithAlphaComponent:0.55]
-                    range:NSMakeRange(0, out.length)];
+    cfg.subtitleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> *(NSDictionary<NSAttributedStringKey, id> *incoming) {
+        NSMutableDictionary *out = [incoming mutableCopy] ?: [NSMutableDictionary dictionary];
+        out[NSFontAttributeName] = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+        out[NSForegroundColorAttributeName] = [VSText() colorWithAlphaComponent:0.55];
         return out;
     };
 
@@ -647,11 +638,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         ? [NSString stringWithFormat:@"%@…", [clip substringToIndex:MIN(clip.length, (NSUInteger)20)]]
         : @"Clipboard trống hoặc không phải code";
 
-    UIView *btn = [self row:@"Dán code từ clipboard"
-                   subtitle:subtitle
-                       icon:@"doc.on.clipboard"
-                      color:hasCode ? nil : [VSText() colorWithAlphaComponent:0.4]
-                     action:hasCode ? ^{
+    void (^act)(void) = hasCode ? ^{
         NSString *c = [[UIPasteboard generalPasteboard].string
                        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (c.length >= 6) {
@@ -660,7 +647,13 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         } else {
             VSToast(@"Không tìm thấy code trong clipboard");
         }
-    } : nil];
+    } : (void (^)(void))nil;
+
+    UIView *btn = [self row:@"Dán code từ clipboard"
+                   subtitle:subtitle
+                       icon:@"doc.on.clipboard"
+                      color:hasCode ? nil : [VSText() colorWithAlphaComponent:0.4]
+                     action:act];
     return btn;
 }
 
