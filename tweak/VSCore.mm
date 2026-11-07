@@ -1,16 +1,19 @@
 //
 //  VSCore.mm
-//  Phần lõi: màu, helper, lịch sử code, quét lớp, phiên nhập hàng loạt, hook.
+//  Phần lõi: màu sắc, helper gọi method, quản lý code, quét lớp và gán ảnh.
+//  Thiết kế độc lập: không hook chồng chéo lên QRCodeManager / MultiLayerWiz
+//  để đảm bảo không gây lỗi nạp code hay xung đột với VSPlusUltra.dylib.
 //
 
 #import "VSToolbox.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <CoreImage/CoreImage.h>
 #import <stdlib.h>
 #import <string.h>
 
 // =====================================================================
-// MARK: - Màu
+// MARK: - Màu sắc
 // =====================================================================
 
 UIColor *VSPink(void) {
@@ -134,16 +137,12 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v) {
 }
 
 // =====================================================================
-// MARK: - Lịch sử code
+// MARK: - Lịch sử code & Tự động nhận diện Clipboard
 // =====================================================================
 
-static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
+static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
 
 @implementation VSCodeEntry
-@end
-
-@interface VSCodeStore ()
-- (NSArray<NSDictionary *> *)rawEntries;
 @end
 
 @implementation VSCodeStore
@@ -151,8 +150,41 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 + (instancetype)sharedStore {
     static VSCodeStore *store = nil;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ store = [[VSCodeStore alloc] init]; });
+    dispatch_once(&once, ^{
+        store = [[VSCodeStore alloc] init];
+        [store setupClipboardObserver];
+    });
     return store;
+}
+
+- (void)setupClipboardObserver {
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserverForName:UIPasteboardChangedNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+        [self checkClipboard];
+    }];
+    [nc addObserverForName:UIApplicationDidBecomeActiveNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+        [self checkClipboard];
+    }];
+}
+
+- (void)checkClipboard {
+    NSString *clip = [UIPasteboard generalPasteboard].string;
+    if (![clip isKindOfClass:[NSString class]]) return;
+    NSString *trimmed = [clip stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length < 6 || trimmed.length > 512) return;
+
+    NSArray<VSCodeEntry *> *current = [self entries];
+    if (current.count > 0 && [current[0].code isEqualToString:trimmed]) {
+        return; // Đã là code mới nhất
+    }
+    [self addCode:trimmed source:@"Clipboard"];
 }
 
 - (NSArray<NSDictionary *> *)rawEntries {
@@ -205,7 +237,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     [[NSUserDefaults standardUserDefaults] setObject:list forKey:kVSCodesKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
-    VSLog(@"code mới: %@ (%@)", trimmed, source ?: @"?");
+    VSLog(@"Đã lưu code mới: %@ (%@)", trimmed, source ?: @"?");
     dispatch_async(dispatch_get_main_queue(), ^{
         [[VSUI sharedUI] refreshPanel];
     });
@@ -222,7 +254,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 @end
 
 // =====================================================================
-// MARK: - Layer info
+// MARK: - Thông tin lớp (Layer Info)
 // =====================================================================
 
 @implementation VSLayerInfo
@@ -247,16 +279,55 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 @end
 
 // =====================================================================
-// MARK: - VSContext
+// MARK: - Trình chọn ảnh (VSImagePicker)
+// =====================================================================
+
+@implementation VSImagePicker {
+    void (^_completion)(UIImage *);
+}
+
++ (instancetype)sharedPicker {
+    static VSImagePicker *p = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ p = [[VSImagePicker alloc] init]; });
+    return p;
+}
+
+- (void)pickImageFrom:(UIViewController *)vc completion:(void (^)(UIImage *image))completion {
+    _completion = [completion copy];
+    UIImagePickerController *picker = [[UIImagePickerController alloc] init];
+    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+    picker.delegate = self;
+    picker.modalPresentationStyle = UIModalPresentationFullScreen;
+    [vc presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
+    UIImage *img = info[UIImagePickerControllerOriginalImage];
+    void (^cb)(UIImage *) = _completion;
+    _completion = nil;
+    [picker dismissViewControllerAnimated:YES completion:^{
+        if (cb && img) {
+            cb(img);
+        }
+    }];
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    _completion = nil;
+    [picker dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
+
+// =====================================================================
+// MARK: - Ngữ cảnh MultiLayer (VSContext)
 // =====================================================================
 
 @interface VSContext ()
 - (UIWindow *)appWindow;
 - (BOOL)isMultiLayerVC:(UIViewController *)vc;
 - (UIViewController *)searchMultiLayerIn:(UIViewController *)vc depth:(int)depth;
-- (void)openPhotoPicker;
-- (void)openVideoPicker;
-- (void)dismissPresentedPicker;
 @end
 
 @implementation VSContext
@@ -274,7 +345,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     NSArray *windows = [UIApplication sharedApplication].windows;
     for (UIWindow *w in windows) {
         if (![w isKindOfClass:[UIWindow class]]) continue;
-        if (w.tag == 0x56535442) continue;                  // cửa sổ của tweak
+        if (w.tag == 0x56535442) continue;                  // Bỏ qua cửa sổ floating của tweak
         if (w.hidden || w.alpha < 0.01) continue;
         if (!w.rootViewController) continue;
 
@@ -378,13 +449,17 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     return out;
 }
 
-- (NSArray<VSLayerInfo *> *)candidatesForVideo:(BOOL)video {
-    (void)video;
+- (NSArray<VSLayerInfo *> *)mediaCandidates {
     NSMutableArray<VSLayerInfo *> *out = [NSMutableArray array];
     for (VSLayerInfo *info in [self scanLayers]) {
         if ([info isMediaCandidate]) [out addObject:info];
     }
     return out;
+}
+
+- (NSArray<VSLayerInfo *> *)candidatesForVideo:(BOOL)video {
+    (void)video;
+    return [self mediaCandidates];
 }
 
 - (int)layerTypeFor:(unsigned long long)number {
@@ -401,7 +476,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     SEL sel = @selector(selectLayerNum:flash:);
     if ([vc respondsToSelector:sel]) {
         VSCallVoidULLBool(vc, sel, number, YES);
-        VSLog(@"chọn lớp %llu", number);
+        VSLog(@"Chọn lớp %llu", number);
     }
 }
 
@@ -420,449 +495,76 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     if ([vc respondsToSelector:sel]) VSCallVoidULLBool(vc, sel, number, YES);
 }
 
-- (void)openPhotoPicker {
-    UIViewController *vc = [self multiLayerViewController];
-    if (!vc) return;
-    VSCallVoid(vc, @selector(showPhotoPicker));
-}
-
-- (void)openVideoPicker {
-    UIViewController *vc = [self multiLayerViewController];
-    if (!vc) return;
-    if ([vc respondsToSelector:@selector(presentImportVideo)]) {
-        VSCallVoid(vc, @selector(presentImportVideo));
-    } else {
-        VSCallVoid(vc, @selector(importVideo));
-    }
-}
-
-// Đóng picker mà app đang present (dùng khi người dùng bấm Bỏ qua / Dừng).
-- (void)dismissPresentedPicker {
-    UIViewController *vc = [self multiLayerViewController];
-    if (!vc) return;
-    UIViewController *presented = vc.presentedViewController;
-    if (!presented) presented = vc.navigationController.presentedViewController;
-    if (!presented) return;
-    VSLog(@"đóng picker đang mở");
-    [presented dismissViewControllerAnimated:YES completion:nil];
-}
-
-@end
-
-// =====================================================================
-// MARK: - Phiên nhập hàng loạt
-// =====================================================================
-
-@interface VSBulkSession ()
-- (void)openPickerForCurrent;
-- (void)invokePickerOn:(UIViewController *)vc generation:(NSUInteger)gen;
-- (void)updateBanner;
-- (void)completeLayer:(unsigned long long)fromLayer
-                apply:(void (^)(unsigned long long target))apply;
-- (void)finish;
-- (void)stopWithMessage:(NSString *)message;
-@end
-
-@implementation VSBulkSession {
-    NSArray<NSNumber *> *_targets;
-    NSUInteger _index;
-    NSUInteger _done;
-    NSUInteger _generation;
-    BOOL _active;
-    BOOL _video;
-    BOOL _awaiting;
-    BOOL _applying;
-}
-
-+ (instancetype)sharedSession {
-    static VSBulkSession *s = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ s = [[VSBulkSession alloc] init]; });
-    return s;
-}
-
-- (BOOL)active            { return _active; }
-- (BOOL)videoMode         { return _video; }
-- (NSUInteger)doneCount   { return _done; }
-- (NSUInteger)targetCount { return _targets.count; }
-
-- (unsigned long long)currentLayer {
-    if (_index >= _targets.count) return 0;
-    return (unsigned long long)_targets[_index].unsignedLongLongValue;
-}
-
-- (void)startWithTargets:(NSArray<NSNumber *> *)targets video:(BOOL)video {
-    if (targets.count == 0) {
-        VSToast(@"Không có lớp nào phù hợp");
-        return;
-    }
-    [self stop];
-    _targets = [targets copy];
-    _index = 0;
-    _done = 0;
-    _video = video;
-    _active = YES;
-    _awaiting = NO;
-    _applying = NO;
-    _generation++;
-    VSLog(@"bắt đầu nhập %@ cho %lu lớp", video ? @"video" : @"ảnh", (unsigned long)targets.count);
-    [self updateBanner];
-    [self openPickerForCurrent];
-}
-
-- (void)stop {
-    _active = NO;
-    _awaiting = NO;
-    _generation++;
-    _targets = nil;
-    _index = 0;
-    [[VSContext sharedContext] dismissPresentedPicker];
-    [[VSUI sharedUI] hideBanner];
-}
-
-- (void)stopWithMessage:(NSString *)message {
-    [self stop];
-    if (message.length) VSToast(message);
-}
-
-- (void)skip {
-    if (!_active || !_targets) return;
-    _awaiting = NO;
-    _index++;
-    [[VSContext sharedContext] dismissPresentedPicker];
-    if (_index >= _targets.count) {
-        [self finish];
-        return;
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (!self->_active) return;
-        [self openPickerForCurrent];
-    });
-}
-
-- (void)finish {
-    NSUInteger done = _done;
-    [self stop];
-    VSToast([NSString stringWithFormat:@"Xong! Đã nhập %lu lớp", (unsigned long)done]);
-}
-
-- (void)updateBanner {
-    NSString *kind = _video ? @"Nhập video" : @"Nhập ảnh";
-    NSString *text = [NSString stringWithFormat:@"%@ • lớp %llu (%lu/%lu)",
-                      kind, [self currentLayer], (unsigned long)(_index + 1),
-                      (unsigned long)_targets.count];
-    __weak typeof(self) weakSelf = self;
-    [[VSUI sharedUI] showBanner:text
-                         onSkip:^{ [weakSelf skip]; }
-                         onStop:^{ [weakSelf stop]; }];
-}
-
-- (void)openPickerForCurrent {
-    if (!_active) return;
-    if (_index >= _targets.count) { [self finish]; return; }
-
-    UIViewController *vc = [[VSContext sharedContext] multiLayerViewController];
-    if (!vc) {
-        [self stopWithMessage:@"Hãy mở trình chỉnh lớp (Multi Layer) trước"];
+// Gán 1 ảnh trực tiếp vào danh sách các lớp đã chọn
+- (void)applyImage:(UIImage *)image toLayers:(NSArray<NSNumber *> *)layers {
+    if (!image || layers.count == 0) return;
+    id engine = [self engine];
+    if (!engine) {
+        VSToast(@"Hãy mở trình chỉnh lớp (Multi Layer) trước");
         return;
     }
 
-    NSUInteger gen = _generation;
-    unsigned long long layer = [self currentLayer];
-    [[VSContext sharedContext] selectLayer:layer];
-    [self updateBanner];
+    SEL sel = @selector(setupImage:layerNum:layerType:clearMask:);
+    if (![engine respondsToSelector:sel]) {
+        VSToast(@"Bản app này không hỗ trợ gán ảnh tự động");
+        return;
+    }
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (!self->_active || gen != self->_generation) return;
-        UIViewController *vc2 = [[VSContext sharedContext] multiLayerViewController];
-        if (!vc2) { [self stopWithMessage:nil]; return; }
-        self->_awaiting = YES;
-        [self invokePickerOn:vc2 generation:gen];
-    });
-}
-
-- (void)invokePickerOn:(UIViewController *)vc generation:(NSUInteger)gen {
-    if (_video) {
-        if ([vc respondsToSelector:@selector(presentImportVideo)]) {
-            VSCallVoid(vc, @selector(presentImportVideo));
-        } else if ([vc respondsToSelector:@selector(importVideo)]) {
-            VSCallVoid(vc, @selector(importVideo));
-        } else {
-            [self stopWithMessage:@"Bản app này không hỗ trợ chọn video"];
+    NSUInteger count = 0;
+    for (NSNumber *num in layers) {
+        unsigned long long n = [num unsignedLongLongValue];
+        int type = [self layerTypeFor:n];
+        @try {
+            ((id (*)(id, SEL, id, unsigned long long, int, BOOL))objc_msgSend)
+                (engine, sel, image, n, type, NO);
+            count++;
+        } @catch (NSException *e) {
+            VSLog(@"Lỗi gán ảnh lớp %llu: %@", n, e.reason);
         }
-        return;
     }
 
-    NSUserDefaults *def = [NSUserDefaults standardUserDefaults];
-    BOOL preferReplace = ([def objectForKey:@"VSToolbox.preferReplace"] != nil)
-                       ? [def boolForKey:@"VSToolbox.preferReplace"]
-                       : YES;
-
-    if (preferReplace && [vc respondsToSelector:@selector(pickNewContent)]) {
-        VSCallVoid(vc, @selector(pickNewContent));
-
-        // Nếu app không mở picker (không có VC nào được present), thử showPhotoPicker.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (!self->_active || gen != self->_generation) return;
-            UIViewController *vc2 = [[VSContext sharedContext] multiLayerViewController];
-            if (!vc2) return;
-            UIViewController *presented = vc2.presentedViewController;
-            if (!presented) presented = vc2.navigationController.presentedViewController;
-            if (presented) return;
-            if ([vc2 respondsToSelector:@selector(showPhotoPicker)]) {
-                VSLog(@"pickNewContent không mở picker → showPhotoPicker");
-                VSCallVoid(vc2, @selector(showPhotoPicker));
-            }
-        });
-        return;
-    }
-
-    if ([vc respondsToSelector:@selector(showPhotoPicker)]) {
-        VSCallVoid(vc, @selector(showPhotoPicker));
-    } else {
-        [self stopWithMessage:@"Bản app này không hỗ trợ chọn ảnh"];
-    }
-}
-
-// Áp dụng media vừa chọn cho đúng lớp đích rồi chuyển lớp.
-- (void)completeLayer:(unsigned long long)fromLayer
-                apply:(void (^)(unsigned long long target))apply {
-    if (!_active) return;
-    _awaiting = NO;
-
-    unsigned long long target = [self currentLayer];
-    NSUInteger gen = _generation;
-    BOOL replicate = (fromLayer != target);
-
-    _done++;
-    _index++;
-
-    if (replicate) {
-        // App tự tạo lớp mới → copy nội dung sang lớp đích sau khi app xử lý xong.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (!self->_active || gen != self->_generation) return;
-            self->_applying = YES;
-            @try { if (apply) apply(target); }
-            @catch (NSException *e) { VSLog(@"apply lỗi: %@", e.reason); }
-            self->_applying = NO;
-            VSToast([NSString stringWithFormat:@"Đã nhập vào lớp %llu", target]);
-
-            // Dọn nội dung lớp do app tự tạo (best-effort, có guard).
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                if (!self->_active || gen != self->_generation) return;
-                [[VSContext sharedContext] removeContentFromLayer:fromLayer];
-            });
-        });
-    }
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.3 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (!self->_active || gen != self->_generation) return;
-        if (self->_index >= self->_targets.count) [self finish];
-        else [self openPickerForCurrent];
-    });
-}
-
-- (void)noteImage:(id)image layer:(unsigned long long)layerNum type:(int)layerType {
-    if (!_active || !_awaiting || _applying) return;
-    if (!image || [image isKindOfClass:[NSNull class]]) return;
-
-    VSLog(@"nhận ảnh cho lớp %llu (loại %d)", layerNum, layerType);
-
-    unsigned long long target = [self currentLayer];
-    int targetType = layerType;
-    if (target != layerNum) targetType = [[VSContext sharedContext] layerTypeFor:target];
-
-    [self completeLayer:layerNum apply:^(unsigned long long t) {
-        id engine = [[VSContext sharedContext] engine];
-        if (!engine) return;
-        SEL sel = @selector(setupImage:layerNum:layerType:clearMask:);
-        if (![engine respondsToSelector:sel]) return;
-        ((id (*)(id, SEL, id, unsigned long long, int, BOOL))objc_msgSend)
-            (engine, sel, image, t, targetType, NO);
-        [[VSContext sharedContext] refreshEditor];
-    }];
-}
-
-- (void)noteVideo:(id)asset layer:(unsigned long long)layerNum volume:(float)volume {
-    if (!_active || !_awaiting || _applying) return;
-    if (!asset || [asset isKindOfClass:[NSNull class]]) return;
-
-    VSLog(@"nhận video cho lớp %llu (vol %.2f)", layerNum, volume);
-
-    [self completeLayer:layerNum apply:^(unsigned long long t) {
-        id engine = [[VSContext sharedContext] engine];
-        if (!engine) return;
-        SEL sel = @selector(setupVideoLayer:forLayer:withInitialVolume:multiCheck:);
-        if (![engine respondsToSelector:sel]) return;
-        ((id (*)(id, SEL, id, unsigned long long, float, BOOL))objc_msgSend)
-            (engine, sel, asset, t, volume, NO);
-        [[VSContext sharedContext] refreshEditor];
-    }];
+    [self refreshEditor];
+    VSToast([NSString stringWithFormat:@"Đã nhập ảnh vào %lu lớp! 🌸", (unsigned long)count]);
 }
 
 @end
 
 // =====================================================================
-// MARK: - Tạo QR từ code (dùng QRCodeManager của app)
+// MARK: - Tạo QR image từ code (Native CIQRCodeGenerator)
 // =====================================================================
 
 UIImage *VSMakeQRImage(NSString *code) {
-    Class qrCls = objc_getClass("QRCodeManager");
-    if (!qrCls) return nil;
-    id mgr = [qrCls new];
-    if (!mgr) return nil;
-    SEL sel = @selector(makeQRCodeImage:desc:icon:);
-    if (![mgr respondsToSelector:sel]) return nil;
-    return ((UIImage *(*)(id, SEL, id, id, id))objc_msgSend)(mgr, sel, code, @"", nil);
+    if (![code isKindOfClass:[NSString class]] || code.length == 0) return nil;
+
+    @try {
+        NSData *data = [code dataUsingEncoding:NSISOLatin1StringEncoding];
+        if (!data) data = [code dataUsingEncoding:NSUTF8StringEncoding];
+        if (!data) return nil;
+
+        CIFilter *filter = [CIFilter filterWithName:@"CIQRCodeGenerator"];
+        [filter setValue:data forKey:@"inputMessage"];
+        [filter setValue:@"M" forKey:@"inputCorrectionLevel"];
+        CIImage *ci = filter.outputImage;
+        if (!ci) return nil;
+
+        CGAffineTransform transform = CGAffineTransformMakeScale(10.0, 10.0);
+        CIImage *scaled = [ci imageByApplyingTransform:transform];
+        return [UIImage imageWithCIImage:scaled];
+    } @catch (NSException *e) {
+        VSLog(@"Lỗi tạo QR: %@", e.reason);
+        return nil;
+    }
 }
 
 // =====================================================================
-// MARK: - Hook infra (Direct swizzling, an toàn tuyệt đối)
-// =====================================================================
-
-static IMP VSHookOne(Class cls, SEL sel, IMP newImp) {
-    if (!cls || !sel) return NULL;
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return NULL;
-    return method_setImplementation(m, newImp);
-}
-
-// 1. Hook MultiLayerWizEffectVC: bắt code khi nạp vào trình chỉnh nhiều lớp
-static void (*orig_ML_importedData)(id, SEL, id, id) = NULL;
-static void VSHook_ML_importedData(id self, SEL _cmd, id data, id code) {
-    @try {
-        if ([code isKindOfClass:[NSString class]]) {
-            [[VSCodeStore sharedStore] addCode:(NSString *)code source:@"MultiLayer"];
-        }
-    } @catch (NSException *e) {
-        VSLog(@"ML_importedData hook: %@", e.reason);
-    }
-    if (orig_ML_importedData) {
-        orig_ML_importedData(self, _cmd, data, code);
-    }
-}
-
-// 2. Hook QRCodeManager: bắt QR khi quét hoặc chọn từ thư viện
-static id (*orig_readQRCode)(id, SEL, id) = NULL;
-static id VSHook_readQRCode(id self, SEL _cmd, id image) {
-    id code = nil;
-    if (orig_readQRCode) {
-        code = orig_readQRCode(self, _cmd, image);
-    }
-    @try {
-        if ([code isKindOfClass:[NSString class]] && [(NSString *)code length] > 0) {
-            [[VSCodeStore sharedStore] addCode:(NSString *)code source:@"QR Scan"];
-        }
-    } @catch (NSException *e) {
-        VSLog(@"readQRCode hook: %@", e.reason);
-    }
-    return code;
-}
-
-static void (*orig_saveCodeToPlist)(id, SEL, id, id) = NULL;
-static void VSHook_saveCodeToPlist(id self, SEL _cmd, id code, id desc) {
-    @try {
-        if ([code isKindOfClass:[NSString class]]) {
-            [[VSCodeStore sharedStore] addCode:(NSString *)code source:@"QRCodeManager"];
-        }
-    } @catch (NSException *e) {
-        VSLog(@"saveCodeToPlist hook: %@", e.reason);
-    }
-    if (orig_saveCodeToPlist) {
-        orig_saveCodeToPlist(self, _cmd, code, desc);
-    }
-}
-
-static void (*orig_selectedCode)(id, SEL, id, id) = NULL;
-static void VSHook_selectedCode(id self, SEL _cmd, id code, id imageData) {
-    @try {
-        NSString *text = nil;
-        if ([code isKindOfClass:[NSString class]]) {
-            text = (NSString *)code;
-        } else if (VSResp(code, @selector(code))) {
-            id value = VSCall0(code, @selector(code));
-            if ([value isKindOfClass:[NSString class]]) text = value;
-        }
-        if (text.length) {
-            [[VSCodeStore sharedStore] addCode:text source:@"Thư viện code"];
-        }
-    } @catch (NSException *e) {
-        VSLog(@"selectedCode hook: %@", e.reason);
-    }
-    if (orig_selectedCode) {
-        orig_selectedCode(self, _cmd, code, imageData);
-    }
-}
-
-// 3. Hook MultiLayerEngine: gán ảnh / video hàng loạt
-static id (*orig_setupImage)(id, SEL, id, unsigned long long, int, BOOL) = NULL;
-static id VSHook_setupImage(id self, SEL _cmd, id image,
-                            unsigned long long layerNum, int layerType, BOOL clearMask) {
-    id result = nil;
-    if (orig_setupImage) {
-        result = orig_setupImage(self, _cmd, image, layerNum, layerType, clearMask);
-    }
-    @try {
-        [[VSBulkSession sharedSession] noteImage:image layer:layerNum type:layerType];
-    } @catch (NSException *e) {
-        VSLog(@"setupImage hook: %@", e.reason);
-    }
-    return result;
-}
-
-static id (*orig_setupVideo)(id, SEL, id, unsigned long long, float, BOOL) = NULL;
-static id VSHook_setupVideo(id self, SEL _cmd, id asset,
-                            unsigned long long layerNum, float volume, BOOL multiCheck) {
-    id result = nil;
-    if (orig_setupVideo) {
-        result = orig_setupVideo(self, _cmd, asset, layerNum, volume, multiCheck);
-    }
-    @try {
-        [[VSBulkSession sharedSession] noteVideo:asset layer:layerNum volume:volume];
-    } @catch (NSException *e) {
-        VSLog(@"setupVideo hook: %@", e.reason);
-    }
-    return result;
-}
-
-// =====================================================================
-// MARK: - Cài hook
+// MARK: - Cài hook an toàn
 // =====================================================================
 
 void VSToolboxInstallHooks(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        Class mlVC = objc_getClass("MultiLayerWizEffectVC");
-        if (mlVC) {
-            orig_ML_importedData = (void (*)(id, SEL, id, id))
-                VSHookOne(mlVC, @selector(importedData:code:), (IMP)VSHook_ML_importedData);
-            VSLog(@"hook MultiLayerWizEffectVC.importedData:code:");
-        }
-
-        Class qr = objc_getClass("QRCodeManager");
-        if (qr) {
-            orig_readQRCode = (id (*)(id, SEL, id))
-                VSHookOne(qr, @selector(readQRCode:), (IMP)VSHook_readQRCode);
-            orig_saveCodeToPlist = (void (*)(id, SEL, id, id))
-                VSHookOne(qr, @selector(saveCodeToPlist:desc:), (IMP)VSHook_saveCodeToPlist);
-            orig_selectedCode = (void (*)(id, SEL, id, id))
-                VSHookOne(qr, @selector(selectedCode:withImageData:), (IMP)VSHook_selectedCode);
-            VSLog(@"hook QRCodeManager");
-        }
-
-        Class engine = objc_getClass("MultiLayerEngine");
-        if (engine) {
-            orig_setupImage = (id (*)(id, SEL, id, unsigned long long, int, BOOL))
-                VSHookOne(engine, @selector(setupImage:layerNum:layerType:clearMask:), (IMP)VSHook_setupImage);
-            orig_setupVideo = (id (*)(id, SEL, id, unsigned long long, float, BOOL))
-                VSHookOne(engine, @selector(setupVideoLayer:forLayer:withInitialVolume:multiCheck:), (IMP)VSHook_setupVideo);
-            VSLog(@"hook MultiLayerEngine");
-        }
+        // Khởi động lắng nghe Clipboard
+        [VSCodeStore sharedStore];
+        VSLog(@"VSToolbox đã khởi tạo (chế độ an toàn, không can thiệp luồng nạp code).");
     });
 }

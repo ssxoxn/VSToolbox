@@ -66,8 +66,8 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
 - (void)clearStack;
 - (void)buildMenu;
 - (void)buildLayerPicker;
-- (void)openLayerPicker:(BOOL)video;
-- (void)startAll:(BOOL)video;
+- (void)openLayerPicker;
+- (void)autoImportAll;
 - (void)updateStartButton;
 - (void)beginPickedSession;
 - (void)closeTapped;
@@ -344,32 +344,20 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         ? [NSString stringWithFormat:@"Đang ở trình chỉnh lớp • %lu lớp có thể nhập", (unsigned long)cands.count]
         : @"Mở trình chỉnh lớp (Multi Layer) để dùng tính năng nhập ảnh/video."]];
 
-    [_stack addArrangedSubview:[self sectionLabel:@"Nhập hàng loạt"]];
+    [_stack addArrangedSubview:[self sectionLabel:@"Tự động nhập ảnh"]];
 
     __weak typeof(self) weakSelf = self;
-    [_stack addArrangedSubview:[self row:@"Ảnh — tất cả lớp"
-                               subtitle:@"Mở thư viện ảnh của app cho từng lớp"
+    [_stack addArrangedSubview:[self row:@"Ảnh — Tự động nhập tất cả lớp"
+                               subtitle:@"Chọn 1 ảnh duy nhất → tự gán vào toàn bộ các lớp ảnh"
                                    icon:@"photo.on.rectangle.angled"
                                   color:nil
-                                 action:^{ [weakSelf startAll:NO]; }]];
-
-    [_stack addArrangedSubview:[self row:@"Video — tất cả lớp"
-                               subtitle:@"Mở chọn video của app cho từng lớp"
-                                   icon:@"video.badge.plus"
-                                  color:nil
-                                 action:^{ [weakSelf startAll:YES]; }]];
+                                 action:^{ [weakSelf autoImportAll]; }]];
 
     [_stack addArrangedSubview:[self row:@"Chọn lớp để nhập ảnh"
-                               subtitle:@"Tự chọn từng lớp ảnh/video cần thay"
+                               subtitle:@"Tự chọn lớp cần nhập → gán 1 ảnh vào các lớp đã chọn"
                                    icon:@"checklist"
                                   color:nil
-                                 action:^{ [weakSelf openLayerPicker:NO]; }]];
-
-    [_stack addArrangedSubview:[self row:@"Chọn lớp để nhập video"
-                               subtitle:@"Tự chọn từng lớp video cần thay"
-                                   icon:@"film.stack"
-                                  color:nil
-                                 action:^{ [weakSelf openLayerPicker:YES]; }]];
+                                 action:^{ [weakSelf openLayerPicker]; }]];
 
     [_stack addArrangedSubview:[self sectionLabel:@"Code gần đây"]];
 
@@ -447,40 +435,50 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     [_stack addArrangedSubview:footer];
 }
 
-// ---------- chọn lớp ----------
+// ---------- chọn lớp & nhập ảnh tự động ----------
 
-- (void)openLayerPicker:(BOOL)video {
+- (void)openLayerPicker {
     if (![[VSContext sharedContext] isInMultiLayerEditor]) {
         VSToast(@"Hãy mở trình chỉnh lớp (Multi Layer) trước");
         return;
     }
-    _mode = video ? 2 : 1;
+    _mode = 1;
     _picked = nil;
     [self reload];
 }
 
-- (void)startAll:(BOOL)video {
+- (void)autoImportAll {
     VSContext *ctx = [VSContext sharedContext];
     if (![ctx isInMultiLayerEditor]) {
         VSToast(@"Hãy mở trình chỉnh lớp (Multi Layer) trước");
         return;
     }
-    NSArray<VSLayerInfo *> *cands = [ctx candidatesForVideo:video];
+    NSArray<VSLayerInfo *> *cands = [ctx mediaCandidates];
     if (cands.count == 0) {
-        VSToast(@"Không tìm thấy lớp ảnh/video phù hợp");
+        VSToast(@"Không tìm thấy lớp ảnh/video phù hợp trong preset này");
         return;
     }
     NSMutableArray<NSNumber *> *targets = [NSMutableArray array];
-    for (VSLayerInfo *i in cands) [targets addObject:@(i.number)];
+    for (VSLayerInfo *i in cands) {
+        [targets addObject:@(i.number)];
+    }
+
+    UIViewController *top = [ctx topViewController];
+    if (!top) {
+        VSToast(@"Không tìm thấy màn hình hiển thị");
+        return;
+    }
 
     [[VSUI sharedUI] hidePanel];
-    [[VSBulkSession sharedSession] startWithTargets:targets video:video];
+
+    [[VSImagePicker sharedPicker] pickImageFrom:top completion:^(UIImage *image) {
+        [[VSContext sharedContext] applyImage:image toLayers:targets];
+    }];
 }
 
 - (void)buildLayerPicker {
-    BOOL video = (_mode == 2);
     VSContext *ctx = [VSContext sharedContext];
-    NSArray<VSLayerInfo *> *cands = [ctx candidatesForVideo:video];
+    NSArray<VSLayerInfo *> *cands = [ctx mediaCandidates];
 
     NSMutableSet<NSNumber *> *valid = [NSMutableSet set];
     for (VSLayerInfo *i in cands) [valid addObject:@(i.number)];
@@ -500,9 +498,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     }]];
 
     [_stack addArrangedSubview:[self hintLabel:
-        video
-        ? @"Chọn các lớp video cần nhập. Bỏ qua lớp trống, văn bản, hiệu ứng."
-        : @"Chọn các lớp ảnh/video cần nhập. Bỏ qua lớp trống, văn bản, hiệu ứng."]];
+        @"Chọn các lớp cần nhập. Bạn chỉ cần chọn 1 ảnh duy nhất, ảnh sẽ tự động được gán vào tất cả các lớp đã bật."]];
 
     if (cands.count == 0) {
         [_stack addArrangedSubview:[self hintLabel:@"Không có lớp phù hợp trong preset này."]];
@@ -535,7 +531,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         if (v.tag != 0x5354 || ![v isKindOfClass:[UIButton class]]) continue;
         UIButton *b = (UIButton *)v;
         NSUInteger n = _picked.count;
-        NSString *title = [NSString stringWithFormat:@"Bắt đầu (%lu lớp)", (unsigned long)n];
+        NSString *title = [NSString stringWithFormat:@"Chọn ảnh & gán vào %lu lớp", (unsigned long)n];
         UIButtonConfiguration *cfg = b.configuration;
         cfg.title = title;
         b.configuration = cfg;
@@ -551,9 +547,16 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         ^NSComparisonResult(id a, id b) {
             return [(NSNumber *)a compare:(NSNumber *)b];
         }];
-    BOOL video = (_mode == 2);
+
+    VSContext *ctx = [VSContext sharedContext];
+    UIViewController *top = [ctx topViewController];
+    if (!top) return;
+
     [[VSUI sharedUI] hidePanel];
-    [[VSBulkSession sharedSession] startWithTargets:sorted video:video];
+
+    [[VSImagePicker sharedPicker] pickImageFrom:top completion:^(UIImage *image) {
+        [[VSContext sharedContext] applyImage:image toLayers:sorted];
+    }];
 }
 
 // ---------- Card nổi bật code gần nhất ----------

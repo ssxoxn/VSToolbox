@@ -3,7 +3,7 @@
 //  VSToolbox — trợ thủ nhập code / nhập ảnh cho Video Star
 //
 //  Chỉ dùng cho mục đích cá nhân: nhập liệu nhanh.
-//  Không can thiệp IAP / license / watermark.
+//  Không can thiệp IAP / license / watermark / crack dylibs.
 //
 
 #import <UIKit/UIKit.h>
@@ -53,7 +53,7 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 - (void)removeAll;
 @end
 
-// ---- Layer ----
+// ---- Layer Info ----
 @interface VSLayerInfo : NSObject
 @property (nonatomic, assign) NSUInteger number;
 @property (nonatomic, assign) int type;
@@ -66,6 +66,13 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 - (NSString *)typeTitle;
 @end
 
+// ---- Helper chọn ảnh từ thư viện ----
+@interface VSImagePicker : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
++ (instancetype)sharedPicker;
+- (void)pickImageFrom:(UIViewController *)vc completion:(void (^)(UIImage *image))completion;
+@end
+
+// ---- Ngữ cảnh MultiLayer ----
 @interface VSContext : NSObject
 + (instancetype)sharedContext;
 - (UIViewController *)topViewController;
@@ -74,26 +81,13 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 - (id)engine;
 - (id)engineFor:(UIViewController *)vc;
 - (NSArray<VSLayerInfo *> *)scanLayers;
+- (NSArray<VSLayerInfo *> *)mediaCandidates;
 - (NSArray<VSLayerInfo *> *)candidatesForVideo:(BOOL)video;
 - (int)layerTypeFor:(unsigned long long)number;
 - (void)selectLayer:(unsigned long long)number;
 - (void)refreshEditor;
 - (void)removeContentFromLayer:(unsigned long long)number;
-@end
-
-// ---- Phiên nhập hàng loạt (dùng picker gốc của app) ----
-@interface VSBulkSession : NSObject
-+ (instancetype)sharedSession;
-@property (nonatomic, readonly) BOOL active;
-@property (nonatomic, readonly) BOOL videoMode;
-@property (nonatomic, readonly) NSUInteger doneCount;
-@property (nonatomic, readonly) NSUInteger targetCount;
-@property (nonatomic, readonly) unsigned long long currentLayer;
-- (void)startWithTargets:(NSArray<NSNumber *> *)targets video:(BOOL)video;
-- (void)stop;
-- (void)skip;
-- (void)noteImage:(id)image layer:(unsigned long long)layerNum type:(int)layerType;
-- (void)noteVideo:(id)asset layer:(unsigned long long)layerNum volume:(float)volume;
+- (void)applyImage:(UIImage *)image toLayers:(NSArray<NSNumber *> *)layers;
 @end
 
 // ---- UI ----
@@ -113,5 +107,5 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 // ---- Tạo QR image từ code ----
 UIImage *VSMakeQRImage(NSString *code);
 
-// ---- Cài hook ----
+// ---- Cài đặt hook ----
 void VSToolboxInstallHooks(void);
