@@ -723,116 +723,49 @@ UIImage *VSMakeQRImage(NSString *code) {
 }
 
 // =====================================================================
-// MARK: - Hook infra (method_setImplementation, không cần substrate)
+// MARK: - Hook infra (Direct swizzling, an toàn tuyệt đối)
 // =====================================================================
 
-static NSMutableDictionary<NSString *, NSValue *> *gVSOrigIMPs = nil;
-
-static NSString *VSKeyFor(Class cls, SEL sel) {
-    return [NSString stringWithFormat:@"%s|%s", class_getName(cls), sel_getName(sel)];
-}
-
-static IMP VSHookMethod(Class cls, SEL sel, IMP newImp) {
+static IMP VSHookOne(Class cls, SEL sel, IMP newImp) {
     if (!cls || !sel) return NULL;
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) return NULL;
-
-    NSString *key = VSKeyFor(cls, sel);
-    if (!gVSOrigIMPs) gVSOrigIMPs = [NSMutableDictionary dictionary];
-    if (!gVSOrigIMPs[key]) {
-        gVSOrigIMPs[key] = [NSValue valueWithPointer:(const void *)(uintptr_t)method_getImplementation(m)];
-    }
-    method_setImplementation(m, newImp);
-    return (IMP)gVSOrigIMPs[key].pointerValue;
+    return method_setImplementation(m, newImp);
 }
 
-static IMP VSOriginalFor(id self, SEL sel) {
-    if (!gVSOrigIMPs) return NULL;
-    Class cls = object_getClass(self);
-    for (; cls; cls = class_getSuperclass(cls)) {
-        NSValue *v = gVSOrigIMPs[VSKeyFor(cls, sel)];
-        if (v) return (IMP)v.pointerValue;
-    }
-    return NULL;
-}
-
-static BOOL VSIsMainExecutableClass(Class cls) {
-    const char *image = class_getImageName(cls);
-    if (!image) return NO;
-    NSString *exe = [[NSBundle mainBundle] executablePath];
-    if (!exe) return YES;
-    return strcmp(image, [exe fileSystemRepresentation]) == 0;
-}
-
-// ---- Bắt code từ mọi class có -importedData:code: ----
-
-static void VSHook_importedData_code(id self, SEL _cmd, id data, id code) {
+// 1. Hook MultiLayerWizEffectVC: bắt code khi nạp vào trình chỉnh nhiều lớp
+static void (*orig_ML_importedData)(id, SEL, id, id) = NULL;
+static void VSHook_ML_importedData(id self, SEL _cmd, id data, id code) {
     @try {
         if ([code isKindOfClass:[NSString class]]) {
-            [[VSCodeStore sharedStore] addCode:(NSString *)code
-                                        source:NSStringFromClass([self class])];
+            [[VSCodeStore sharedStore] addCode:(NSString *)code source:@"MultiLayer"];
         }
     } @catch (NSException *e) {
-        VSLog(@"importedData hook: %@", e.reason);
+        VSLog(@"ML_importedData hook: %@", e.reason);
     }
-    IMP imp = VSOriginalFor(self, _cmd);
-    if (imp) ((void (*)(id, SEL, id, id))imp)(self, _cmd, data, code);
-}
-
-// Một số màn hình chỉ gọi validCode: khi người dùng nhập code (chưa qua importedData:code:).
-static BOOL VSHook_validCode(id self, SEL _cmd, id code) {
-    IMP imp = VSOriginalFor(self, _cmd);
-    BOOL ok = NO;
-    if (imp) ok = ((BOOL (*)(id, SEL, id))imp)(self, _cmd, code);
-
-    if (ok && [code isKindOfClass:[NSString class]]) {
-        @try {
-            [[VSCodeStore sharedStore] addCode:(NSString *)code
-                                        source:NSStringFromClass([self class])];
-        } @catch (NSException *e) {
-            VSLog(@"validCode hook: %@", e.reason);
-        }
+    if (orig_ML_importedData) {
+        orig_ML_importedData(self, _cmd, data, code);
     }
-    return ok;
 }
 
-static void VSInstallHooksForSelector(SEL sel, IMP newImp) {
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return;
-
-    Class *classes = (Class *)malloc(sizeof(Class) * (size_t)count);
-    if (!classes) return;
-    count = objc_getClassList(classes, count);
-
-    int hooked = 0;
-    for (int i = 0; i < count; i++) {
-        Class cls = classes[i];
-        if (!VSIsMainExecutableClass(cls)) continue;
-
-        BOOL implements = NO;
-        unsigned int mcount = 0;
-        Method *methods = class_copyMethodList(cls, &mcount);
-        for (unsigned int j = 0; j < mcount; j++) {
-            if (sel_isEqual(method_getName(methods[j]), sel)) { implements = YES; break; }
-        }
-        if (methods) free(methods);
-
-        if (implements) {
-            VSHookMethod(cls, sel, newImp);
-            hooked++;
-        }
+// 2. Hook QRCodeManager: bắt QR khi quét hoặc chọn từ thư viện
+static id (*orig_readQRCode)(id, SEL, id) = NULL;
+static id VSHook_readQRCode(id self, SEL _cmd, id image) {
+    id code = nil;
+    if (orig_readQRCode) {
+        code = orig_readQRCode(self, _cmd, image);
     }
-    free(classes);
-    VSLog(@"hook %s ở %d class", sel_getName(sel), hooked);
+    @try {
+        if ([code isKindOfClass:[NSString class]] && [(NSString *)code length] > 0) {
+            [[VSCodeStore sharedStore] addCode:(NSString *)code source:@"QR Scan"];
+        }
+    } @catch (NSException *e) {
+        VSLog(@"readQRCode hook: %@", e.reason);
+    }
+    return code;
 }
 
-static void VSInstallCodeHooks(void) {
-    VSInstallHooksForSelector(@selector(importedData:code:), (IMP)VSHook_importedData_code);
-    VSInstallHooksForSelector(@selector(validCode:), (IMP)VSHook_validCode);
-}
-
-// ---- QRCodeManager: bắt code được lưu / chọn trong thư viện ----
-
+static void (*orig_saveCodeToPlist)(id, SEL, id, id) = NULL;
 static void VSHook_saveCodeToPlist(id self, SEL _cmd, id code, id desc) {
     @try {
         if ([code isKindOfClass:[NSString class]]) {
@@ -841,10 +774,12 @@ static void VSHook_saveCodeToPlist(id self, SEL _cmd, id code, id desc) {
     } @catch (NSException *e) {
         VSLog(@"saveCodeToPlist hook: %@", e.reason);
     }
-    IMP imp = VSOriginalFor(self, _cmd);
-    if (imp) ((void (*)(id, SEL, id, id))imp)(self, _cmd, code, desc);
+    if (orig_saveCodeToPlist) {
+        orig_saveCodeToPlist(self, _cmd, code, desc);
+    }
 }
 
+static void (*orig_selectedCode)(id, SEL, id, id) = NULL;
 static void VSHook_selectedCode(id self, SEL _cmd, id code, id imageData) {
     @try {
         NSString *text = nil;
@@ -860,19 +795,18 @@ static void VSHook_selectedCode(id self, SEL _cmd, id code, id imageData) {
     } @catch (NSException *e) {
         VSLog(@"selectedCode hook: %@", e.reason);
     }
-    IMP imp = VSOriginalFor(self, _cmd);
-    if (imp) ((void (*)(id, SEL, id, id))imp)(self, _cmd, code, imageData);
+    if (orig_selectedCode) {
+        orig_selectedCode(self, _cmd, code, imageData);
+    }
 }
 
-// ---- MultiLayerEngine: bắt thời điểm app gán ảnh / video ----
-
+// 3. Hook MultiLayerEngine: gán ảnh / video hàng loạt
+static id (*orig_setupImage)(id, SEL, id, unsigned long long, int, BOOL) = NULL;
 static id VSHook_setupImage(id self, SEL _cmd, id image,
                             unsigned long long layerNum, int layerType, BOOL clearMask) {
-    IMP imp = VSOriginalFor(self, _cmd);
     id result = nil;
-    if (imp) {
-        result = ((id (*)(id, SEL, id, unsigned long long, int, BOOL))imp)
-            (self, _cmd, image, layerNum, layerType, clearMask);
+    if (orig_setupImage) {
+        result = orig_setupImage(self, _cmd, image, layerNum, layerType, clearMask);
     }
     @try {
         [[VSBulkSession sharedSession] noteImage:image layer:layerNum type:layerType];
@@ -882,13 +816,12 @@ static id VSHook_setupImage(id self, SEL _cmd, id image,
     return result;
 }
 
+static id (*orig_setupVideo)(id, SEL, id, unsigned long long, float, BOOL) = NULL;
 static id VSHook_setupVideo(id self, SEL _cmd, id asset,
                             unsigned long long layerNum, float volume, BOOL multiCheck) {
-    IMP imp = VSOriginalFor(self, _cmd);
     id result = nil;
-    if (imp) {
-        result = ((id (*)(id, SEL, id, unsigned long long, float, BOOL))imp)
-            (self, _cmd, asset, layerNum, volume, multiCheck);
+    if (orig_setupVideo) {
+        result = orig_setupVideo(self, _cmd, asset, layerNum, volume, multiCheck);
     }
     @try {
         [[VSBulkSession sharedSession] noteVideo:asset layer:layerNum volume:volume];
@@ -905,22 +838,31 @@ static id VSHook_setupVideo(id self, SEL _cmd, id asset,
 void VSToolboxInstallHooks(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        VSInstallCodeHooks();
+        Class mlVC = objc_getClass("MultiLayerWizEffectVC");
+        if (mlVC) {
+            orig_ML_importedData = (void (*)(id, SEL, id, id))
+                VSHookOne(mlVC, @selector(importedData:code:), (IMP)VSHook_ML_importedData);
+            VSLog(@"hook MultiLayerWizEffectVC.importedData:code:");
+        }
 
         Class qr = objc_getClass("QRCodeManager");
         if (qr) {
-            VSHookMethod(qr, @selector(saveCodeToPlist:desc:), (IMP)VSHook_saveCodeToPlist);
-            VSHookMethod(qr, @selector(selectedCode:withImageData:), (IMP)VSHook_selectedCode);
-            VSLog(@"hook QRCodeManager.saveCodeToPlist / selectedCode");
+            orig_readQRCode = (id (*)(id, SEL, id))
+                VSHookOne(qr, @selector(readQRCode:), (IMP)VSHook_readQRCode);
+            orig_saveCodeToPlist = (void (*)(id, SEL, id, id))
+                VSHookOne(qr, @selector(saveCodeToPlist:desc:), (IMP)VSHook_saveCodeToPlist);
+            orig_selectedCode = (void (*)(id, SEL, id, id))
+                VSHookOne(qr, @selector(selectedCode:withImageData:), (IMP)VSHook_selectedCode);
+            VSLog(@"hook QRCodeManager");
         }
 
         Class engine = objc_getClass("MultiLayerEngine");
         if (engine) {
-            VSHookMethod(engine, @selector(setupImage:layerNum:layerType:clearMask:),
-                         (IMP)VSHook_setupImage);
-            VSHookMethod(engine, @selector(setupVideoLayer:forLayer:withInitialVolume:multiCheck:),
-                         (IMP)VSHook_setupVideo);
-            VSLog(@"hook MultiLayerEngine.setupImage / setupVideoLayer");
+            orig_setupImage = (id (*)(id, SEL, id, unsigned long long, int, BOOL))
+                VSHookOne(engine, @selector(setupImage:layerNum:layerType:clearMask:), (IMP)VSHook_setupImage);
+            orig_setupVideo = (id (*)(id, SEL, id, unsigned long long, float, BOOL))
+                VSHookOne(engine, @selector(setupVideoLayer:forLayer:withInitialVolume:multiCheck:), (IMP)VSHook_setupVideo);
+            VSLog(@"hook MultiLayerEngine");
         }
     });
 }
