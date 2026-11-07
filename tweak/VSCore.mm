@@ -152,32 +152,29 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         store = [[VSCodeStore alloc] init];
-        [store setupClipboardObserver];
     });
     return store;
 }
 
-- (void)setupClipboardObserver {
-    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-    [nc addObserverForName:UIPasteboardChangedNotification
-                    object:nil
-                     queue:[NSOperationQueue mainQueue]
-                usingBlock:^(NSNotification *note) {
-        [self checkClipboard];
-    }];
-    [nc addObserverForName:UIApplicationDidBecomeActiveNotification
-                    object:nil
-                     queue:[NSOperationQueue mainQueue]
-                usingBlock:^(NSNotification *note) {
-        [self checkClipboard];
-    }];
-}
-
 - (void)checkClipboard {
-    NSString *clip = [UIPasteboard generalPasteboard].string;
-    if (![clip isKindOfClass:[NSString class]]) return;
-    NSString *trimmed = [clip stringByTrimmingCharactersInSet:
-                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    @try {
+        UIPasteboard *pb = [UIPasteboard generalPasteboard];
+        if (!pb.hasStrings) return;
+        NSString *clip = pb.string;
+        if (![clip isKindOfClass:[NSString class]]) return;
+        NSString *trimmed = [clip stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length < 6 || trimmed.length > 512) return;
+
+        NSArray<VSCodeEntry *> *current = [self entries];
+        if (current.count > 0 && [current[0].code isEqualToString:trimmed]) {
+            return; // Đã là code mới nhất
+        }
+        [self addCode:trimmed source:@"Clipboard"];
+    } @catch (NSException *e) {
+        VSLog(@"Clipboard check error: %@", e.reason);
+    }
+}
     if (trimmed.length < 6 || trimmed.length > 512) return;
 
     NSArray<VSCodeEntry *> *current = [self entries];
@@ -357,7 +354,9 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
 
 - (UIViewController *)topViewController {
     UIViewController *vc = [self appWindow].rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
+    while (vc.presentedViewController && !vc.presentedViewController.isBeingDismissed) {
+        vc = vc.presentedViewController;
+    }
     if ([vc isKindOfClass:[UINavigationController class]]) {
         vc = [(UINavigationController *)vc visibleViewController];
     }

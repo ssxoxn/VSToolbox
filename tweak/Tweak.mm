@@ -18,16 +18,17 @@ static void VSToolboxInit(void) {
         VSToolboxInstallHooks();
 
         [[NSNotificationCenter defaultCenter]
-            addObserverForName:UIApplicationDidFinishLaunchingNotification
+            addObserverForName:UIApplicationDidBecomeActiveNotification
                         object:nil
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(NSNotification *note) {
-            [[VSUI sharedUI] install];
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    [[VSUI sharedUI] install];
+                });
+            });
         }];
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [[VSUI sharedUI] install];
-        });
     }
 }

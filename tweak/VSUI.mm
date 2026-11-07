@@ -46,12 +46,49 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
 @end
 
 @implementation VSRootVC
+
 - (void)loadView {
     VSPassthroughView *v = [[VSPassthroughView alloc] initWithFrame:[UIScreen mainScreen].bounds];
     v.backgroundColor = [UIColor clearColor];
     v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.view = v;
 }
+
+- (UIViewController *)currentAppVC {
+    UIWindow *w = nil;
+    for (UIWindow *win in [UIApplication sharedApplication].windows) {
+        if (win.tag != 0x56535442 && !win.hidden && win.rootViewController) {
+            w = win;
+            break;
+        }
+    }
+    UIViewController *vc = w.rootViewController;
+    while (vc.presentedViewController && !vc.presentedViewController.isBeingDismissed) {
+        vc = vc.presentedViewController;
+    }
+    return vc;
+}
+
+- (BOOL)shouldAutorotate {
+    UIViewController *vc = [self currentAppVC];
+    return vc ? [vc shouldAutorotate] : YES;
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    UIViewController *vc = [self currentAppVC];
+    return vc ? [vc supportedInterfaceOrientations] : UIInterfaceOrientationMaskAll;
+}
+
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    UIViewController *vc = [self currentAppVC];
+    return vc ? [vc preferredInterfaceOrientationForPresentation] : UIInterfaceOrientationPortrait;
+}
+
+- (BOOL)prefersStatusBarHidden {
+    UIViewController *vc = [self currentAppVC];
+    return vc ? [vc prefersStatusBarHidden] : NO;
+}
+
 @end
 
 // =====================================================================
@@ -865,29 +902,27 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         return;
     }
 
+    if (_window) {
+        _window.hidden = NO;
+        return;
+    }
+
     UIWindowScene *scene = [self activeScene];
-    if (!scene && !_window) {
-        if (_installAttempts++ < 60) {
+    if (!scene) {
+        if (_installAttempts++ < 40) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ [self install]; });
         }
         return;
     }
 
-    if (_window) {
-        if (!scene || _window.windowScene == scene) {
-            _window.hidden = NO;
-            return;
-        }
-        [self teardownWindow];
-    }
-
     _installAttempts = 0;
     [self buildWindowWithScene:scene];
-    VSLog(@"UI đã cài (window scene: %@)", scene ? @"có" : @"không");
+    VSLog(@"UI đã cài thành công");
 }
 
 - (void)buildWindowWithScene:(UIWindowScene *)scene {
+    if (_window) return;
     if (scene) {
         _window = [[VSFloatingWindow alloc] initWithWindowScene:scene];
         _window.frame = scene.coordinateSpace.bounds;
@@ -895,14 +930,14 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         _window = [[VSFloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     }
     _window.tag = kVSVSToolboxWindowTag;
-    _window.windowLevel = UIWindowLevelAlert + 1;
+    _window.windowLevel = UIWindowLevelNormal + 1.0;
     _window.backgroundColor = [UIColor clearColor];
     _window.rootViewController = [[VSRootVC alloc] init];
     _window.hidden = NO;
     _root = (VSRootVC *)_window.rootViewController;
 
     [self buildFAB];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         [self placeFABFromDefaults];
     });
@@ -1009,6 +1044,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
 
 - (void)showPanel {
     if (!_root) { [self install]; return; }
+    [[VSCodeStore sharedStore] checkClipboard];
 
     if (!_panel) {
         _panel = [[VSPanelView alloc] initWithFrame:_root.view.bounds];
