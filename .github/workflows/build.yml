@@ -10,56 +10,28 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cài dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            build-essential fakeroot rsync curl perl zip git \
-            libxml2-dev libtinfo6 xz-utils
-
-      - name: Cài Theos + toolchain + SDK
-        run: |
-          set -eux
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
-
-          curl -L --retry 3 --retry-delay 3 \
-            -o /tmp/ios-toolchain.tar.xz \
-            https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz
-
-          rm -rf /tmp/tc && mkdir -p /tmp/tc
-          tar -xJf /tmp/ios-toolchain.tar.xz -C /tmp/tc
-
-          clang_bin="$(find /tmp/tc -type f -name clang | head -n1)"
-          tc_root="$(dirname "$(dirname "$clang_bin")")"
-          mkdir -p "$HOME/theos/toolchain/linux/iphone"
-          cp -a "$tc_root"/. "$HOME/theos/toolchain/linux/iphone/"
-
-          git clone --depth 1 --filter=blob:none --sparse \
-            https://github.com/theos/sdks.git /tmp/sdks
-          cd /tmp/sdks
-          git sparse-checkout set iPhoneOS16.5.sdk
-          mkdir -p "$HOME/theos/sdks"
-          cp -a iPhoneOS16.5.sdk "$HOME/theos/sdks/"
-
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+      # Action chính thức của Theos — tự lo toolchain + SDK
+      - name: Setup Theos
+        uses: theos/theos-action@v1
+        with:
+          theos-sdks-sha: main   # pull SDKs mới nhất từ theos/sdks
+          cache: true
 
       - name: Build dylib
         run: make -C tweak dylib
 
-      - name: Kiểm tra phụ thuộc (không được link substrate)
+      - name: Kiểm tra artifact
         run: |
-          set -eux
+          set -e
           dylib=tweak/dist/VSToolbox.dylib
-          bin="$(find "$HOME/theos/toolchain/linux/iphone" -type f -name 'llvm-objdump' | head -n1 || true)"
-          if [ -n "$bin" ]; then
-            "$bin" -p "$dylib" | sed -n '1,80p'
-          fi
+          ls -lh "$dylib"
           if strings "$dylib" | grep -qi 'substrate'; then
-            echo "LỖI: dylib còn phụ thuộc substrate"; exit 1
+            echo "LỖI: dylib còn link substrate"; exit 1
           fi
           echo "OK: không phụ thuộc substrate"
 
