@@ -1,7 +1,10 @@
 //
 //  VSCore.mm
-//  Phần lõi: màu, helper, lịch sử code, quét lớp, phiên nhập hàng loạt (polling, không swizzle).
-//  Không dùng method_setImplementation → không xung đột với VSPlusUltra / VSFix / CydiaSubstrate.
+//  Phần lõi: màu, helper, lịch sử code, quét lớp, phiên nhập hàng loạt (polling).
+//  Hook an toàn: chỉ hook importedData:code: + validCode: để bắt code tự động.
+//  KHÔNG hook QRCodeManager.saveCodeToPlist:desc: (giữ nguyên cho VSPlusUltra xử lý Pro).
+//  KHÔNG hook MultiLayerEngine.setupImage/setupVideoLayer (dùng polling).
+//  Không dùng method_setImplementation để can thiệp sâu vào state của app.
 //
 
 #import "VSToolbox.h"
@@ -136,7 +139,7 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v) {
 }
 
 // =====================================================================
-// MARK: - Lịch sử code (chỉ lưu khi người dùng nhập thủ công từ UI)
+// MARK: - Lịch sử code (tự động bắt từ app + nhập thủ công)
 // =====================================================================
 
 static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
@@ -228,7 +231,6 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     NSString *trimmed = [text stringByTrimmingCharactersInSet:
                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (trimmed.length < 6 || trimmed.length > 512) return;
-    // Tránh trùng với code đã có
     for (VSCodeEntry *e in [self entries]) {
         if ([e.code isEqualToString:trimmed]) return;
     }
@@ -404,6 +406,10 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     return out;
 }
 
+- (NSArray<VSLayerInfo *> *)mediaCandidates {
+    return [self candidatesForVideo:NO];
+}
+
 - (int)layerTypeFor:(unsigned long long)number {
     id engine = [self engine];
     if (!engine) return 0;
@@ -472,10 +478,6 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     id layer = VSCallULL(engine, @selector(layerAtLayerNum:), number);
     if (!layer || [layer isKindOfClass:[NSNull class]]) return NO;
     return VSCall0(layer, @selector(origAssetInfo)) != nil;
-}
-
-- (NSArray<VSLayerInfo *> *)mediaCandidates {
-    return [self candidatesForVideo:NO];
 }
 
 - (void)applyImage:(UIImage *)image toLayers:(NSArray<NSNumber *> *)layers {
@@ -576,7 +578,19 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 
 - (void)skip {
     if (!_active || !_targets) return;
-    [self skipLayer:_generation];
+    _awaiting = NO;
+    _pollAttempts = 0;
+    _index++;
+    [[VSContext sharedContext] dismissPresentedPicker];
+    if (_index >= _targets.count) {
+        [self finish];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!self->_active) return;
+        [self openPickerForCurrent];
+    });
 }
 
 - (void)finish {
@@ -716,69 +730,123 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 @end
 
 // =====================================================================
-// MARK: - QR image generator
+// MARK: - Hook infra (method_setImplementation, chỉ dùng để bắt code)
 // =====================================================================
 
-UIImage *VSMakeQRImage(NSString *code) {
-    if (!code || code.length == 0) return nil;
-    CIFilter *filter = [CIFilter filterWithName:@"CIQRCodeGenerator"];
-    if (!filter) return nil;
-    [filter setValue:[code dataUsingEncoding:NSUTF8StringEncoding] forKey:@"inputMessage"];
-    [filter setValue:@"H" forKey:@"inputCorrectionLevel"];
-    CIImage *output = [filter outputImage];
-    if (!output) return nil;
-    CGRect extent = [output extent];
-    CGFloat scale = 200.0 / extent.size.width;
-    CIImage *scaled = [output imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
-    CIContext *ctx = [CIContext context];
-    CGImageRef cg = [ctx createCGImage:scaled fromRect:[scaled extent]];
-    UIImage *img = [UIImage imageWithCGImage:cg];
-    CGImageRelease(cg);
-    return img;
+static NSMutableDictionary<NSString *, NSValue *> *gVSOrigIMPs = nil;
+
+static NSString *VSKeyFor(Class cls, SEL sel) {
+    return [NSString stringWithFormat:@"%s|%s", class_getName(cls), sel_getName(sel)];
+}
+
+static IMP VSHookMethod(Class cls, SEL sel, IMP newImp) {
+    if (!cls || !sel) return NULL;
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return NULL;
+
+    NSString *key = VSKeyFor(cls, sel);
+    if (!gVSOrigIMPs) gVSOrigIMPs = [NSMutableDictionary dictionary];
+    if (!gVSOrigIMPs[key]) {
+        gVSOrigIMPs[key] = [NSValue valueWithPointer:method_getImplementation(m)];
+    }
+    method_setImplementation(m, newImp);
+    return (IMP)gVSOrigIMPs[key].pointerValue;
+}
+
+static IMP VSOriginalFor(id self, SEL sel) {
+    if (!gVSOrigIMPs) return NULL;
+    Class cls = object_getClass(self);
+    for (; cls; cls = class_getSuperclass(cls)) {
+        NSValue *v = gVSOrigIMPs[VSKeyFor(cls, sel)];
+        if (v) return (IMP)v.pointerValue;
+    }
+    return NULL;
+}
+
+static BOOL VSIsMainExecutableClass(Class cls) {
+    const char *image = class_getImageName(cls);
+    if (!image) return NO;
+    NSString *exe = [[NSBundle mainBundle] executablePath];
+    if (!exe) return YES;
+    return strcmp(image, [exe fileSystemRepresentation]) == 0;
+}
+
+// ---- Hook importedData:code: ----
+
+static void VSHook_importedData_code(id self, SEL _cmd, id data, id code) {
+    @try {
+        if ([code isKindOfClass:[NSString class]]) {
+            [[VSCodeStore sharedStore] addCode:(NSString *)code
+                                        source:NSStringFromClass([self class])];
+        }
+    } @catch (NSException *e) {
+        VSLog(@"importedData hook: %@", e.reason);
+    }
+    IMP imp = VSOriginalFor(self, _cmd);
+    if (imp) ((void (*)(id, SEL, id, id))imp)(self, _cmd, data, code);
+}
+
+// ---- Hook validCode: ----
+
+static BOOL VSHook_validCode(id self, SEL _cmd, id code) {
+    IMP imp = VSOriginalFor(self, _cmd);
+    BOOL ok = NO;
+    if (imp) ok = ((BOOL (*)(id, SEL, id))imp)(self, _cmd, code);
+
+    if (ok && [code isKindOfClass:[NSString class]]) {
+        @try {
+            [[VSCodeStore sharedStore] addCode:(NSString *)code
+                                        source:NSStringFromClass([self class])];
+        } @catch (NSException *e) {
+            VSLog(@"validCode hook: %@", e.reason);
+        }
+    }
+    return ok;
+}
+
+static void VSInstallHooksForSelector(SEL sel, IMP newImp) {
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return;
+
+    Class *classes = (Class *)malloc(sizeof(Class) * (size_t)count);
+    if (!classes) return;
+    count = objc_getClassList(classes, count);
+
+    int hooked = 0;
+    for (int i = 0; i < count; i++) {
+        Class cls = classes[i];
+        if (!VSIsMainExecutableClass(cls)) continue;
+
+        BOOL implements = NO;
+        unsigned int mcount = 0;
+        Method *methods = class_copyMethodList(cls, &mcount);
+        for (unsigned int j = 0; j < mcount; j++) {
+            if (sel_isEqual(method_getName(methods[j]), sel)) { implements = YES; break; }
+        }
+        if (methods) free(methods);
+
+        if (implements) {
+            VSHookMethod(cls, sel, newImp);
+            hooked++;
+        }
+    }
+    free(classes);
+    VSLog(@"hook %s ở %d class", sel_getName(sel), hooked);
+}
+
+static void VSInstallCodeHooks(void) {
+    VSInstallHooksForSelector(@selector(importedData:code:), (IMP)VSHook_importedData_code);
+    VSInstallHooksForSelector(@selector(validCode:), (IMP)VSHook_validCode);
 }
 
 // =====================================================================
-// MARK: - Image picker (UIKit, không swizzle app)
+// MARK: - Cài hook (chỉ hook code, không hook method quan trọng của app)
 // =====================================================================
 
-@interface VSImagePicker () <UINavigationControllerDelegate, UIImagePickerControllerDelegate>
-@property (nonatomic, strong) UIImagePickerController *picker;
-@property (nonatomic, copy) void (^completion)(UIImage *image);
-@end
-
-@implementation VSImagePicker
-
-+ (instancetype)sharedPicker {
-    static VSImagePicker *p = nil;
+void VSToolboxInstallHooks(void) {
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ p = [[VSImagePicker alloc] init]; });
-    return p;
+    dispatch_once(&once, ^{
+        VSInstallCodeHooks();
+        VSLog(@"đã cài hook code (importedData:code: + validCode:)");
+    });
 }
-
-- (void)pickImageFrom:(UIViewController *)vc completion:(void (^)(UIImage *))completion {
-    self.completion = completion;
-    UIImagePickerController *picker = [[UIImagePickerController alloc] init];
-    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-    picker.mediaTypes = @[@"public.image"];
-    picker.delegate = self;
-    self.picker = picker;
-    [vc presentViewController:picker animated:YES completion:nil];
-}
-
-- (void)imagePickerController:(UIImagePickerController *)picker
-didFinishPickingMediaWithInfo:(NSDictionary<NSString *,id> *)info {
-    UIImage *img = info[UIImagePickerControllerOriginalImage];
-    if (self.completion) self.completion(img);
-    self.completion = nil;
-    [picker dismissViewControllerAnimated:YES completion:nil];
-    self.picker = nil;
-}
-
-- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
-    if (self.completion) self.completion(nil);
-    self.completion = nil;
-    [picker dismissViewControllerAnimated:YES completion:nil];
-    self.picker = nil;
-}
-
-@end

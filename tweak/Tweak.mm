@@ -1,7 +1,8 @@
 //
 //  Tweak.mm
-//  Điểm vào: chỉ cài UI sau khi app khởi tạo xong, không dùng Logos/%hook,
-//  không swizzle method app nào (để chạy song song với VSPlusUltra / VSFix / CydiaSubstrate).
+//  Điểm vào: cài hook code an toàn + UI sau khi app khởi tạo xong,
+//  không dùng Logos/%hook, không swizzle method quan trọng của app
+//  (để chạy song song với VSPlusUltra / VSFix / CydiaSubstrate và bảo toàn Pro).
 //
 
 #import "VSToolbox.h"
@@ -16,25 +17,24 @@ static void VSToolboxInit(void) {
 
         VSLog(@"đang nạp vào %@", bundleID);
 
-        // Không gọi VSToolboxInstallHooks() — không swizzle method app,
-        // tránh xung đột với dylib đã tiêm sẵn (VSPlusUltra, VSFix1-4, CydiaSubstrate).
-
-        // Chỉ đăng ký observer, cài UI sau khi app hoàn tất khởi tạo
+        // Chỉ đăng ký observer, cài hook + UI sau khi app hoàn tất khởi tạo
         // để giảm thiểu can thiệp vào quá trình kích hoạt Pro của VSPlusUltra.
         [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidFinishLaunchingNotification
                         object:nil
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(NSNotification *note) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                [[VSUI sharedUI] install];
+                VSToolboxInstallHooks();      // cài hook code an toàn
+                [[VSUI sharedUI] install];    // cài UI 🌸
             });
         }];
 
         // Fallback nếu notification không phát sinh
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
+            VSToolboxInstallHooks();
             [[VSUI sharedUI] install];
         });
     }

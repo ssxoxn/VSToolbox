@@ -991,7 +991,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         _window = [[VSFloatingWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     }
     _window.tag = kVSVSToolboxWindowTag;
-    _window.windowLevel = UIWindowLevelNormal + 1.0;
+    _window.windowLevel = UIWindowLevelNormal;
     _window.backgroundColor = [UIColor clearColor];
     _window.rootViewController = [[VSRootVC alloc] init];
     _window.hidden = NO;
