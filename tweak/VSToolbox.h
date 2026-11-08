@@ -79,6 +79,12 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 - (void)skip;
 @end
 
+// ---- Chuỗi QR → preset → ảnh ----
+@interface VSBatchImport : NSObject
++ (instancetype)sharedImport;
+- (void)start;
+@end
+
 // ---- Helper chọn ảnh từ thư viện ----
 @interface VSImagePicker : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 + (instancetype)sharedPicker;
@@ -101,6 +107,7 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 - (void)refreshEditor;
 - (void)removeContentFromLayer:(unsigned long long)number;
 - (void)applyImage:(UIImage *)image toLayers:(NSArray<NSNumber *> *)layers;
+- (BOOL)applyImportedCode:(NSString *)code;
 - (BOOL)layerHasContent:(unsigned long long)number;
 - (void)dismissPresentedPicker;
 @end

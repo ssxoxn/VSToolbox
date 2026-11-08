@@ -7,6 +7,7 @@
 //
 
 #import "VSToolbox.h"
+#import <PhotosUI/PhotosUI.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <stdlib.h>
@@ -363,6 +364,140 @@ NSDictionary<NSString *, NSString *> *VSProRuntimeValues(void) {
 static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 
 @implementation VSCodeEntry
+@end
+
+// =====================================================================
+// MARK: - Chuỗi ảnh QR → import code → gán một ảnh
+// =====================================================================
+
+@interface VSBatchImport () <PHPickerViewControllerDelegate>
+@end
+
+@implementation VSBatchImport {
+    NSMutableArray<NSString *> *_codes;
+    NSArray<PHPickerResult *> *_qrResults;
+    UIImage *_image;
+    NSUInteger _mode;       // 0: chọn/đọc QR, 1: chọn ảnh cần gán
+    NSUInteger _generation;
+    NSUInteger _index;
+}
+
++ (instancetype)sharedImport {
+    static VSBatchImport *s = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [[VSBatchImport alloc] init]; });
+    return s;
+}
+
+- (PHPickerViewController *)pickerWithLimit:(NSInteger)limit {
+    PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
+    cfg.filter = [PHPickerFilter imagesFilter];
+    cfg.selectionLimit = limit;
+    PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:cfg];
+    picker.delegate = self;
+    return picker;
+}
+
+- (void)start {
+    UIViewController *vc = [[VSContext sharedContext] topViewController];
+    if (!vc) { VSToast(@"Không tìm thấy màn hình để chọn ảnh QR"); return; }
+    _generation++;
+    _mode = 0;
+    _index = 0;
+    _image = nil;
+    _codes = [NSMutableArray array];
+    [vc presentViewController:[self pickerWithLimit:0] animated:YES completion:nil];
+}
+
+- (NSString *)codeFromImage:(UIImage *)image {
+    if (!image.CGImage) return nil;
+    CIImage *ci = [CIImage imageWithCGImage:image.CGImage];
+    CIDetector *detector = [CIDetector detectorOfType:CIDetectorTypeQRCode
+                                               context:nil
+                                               options:@{CIDetectorAccuracy: CIDetectorAccuracyHigh}];
+    for (CIQRCodeFeature *feature in [detector featuresInImage:ci]) {
+        NSString *value = [feature.messageString stringByTrimmingCharactersInSet:
+                           [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (value.length >= 6) return value;
+    }
+    return nil;
+}
+
+- (void)decodeQRAt:(NSUInteger)pos generation:(NSUInteger)generation {
+    if (generation != _generation) return;
+    if (pos >= _qrResults.count) {
+        if (_codes.count == 0) { VSToast(@"Không đọc được QR hợp lệ từ các ảnh đã chọn"); return; }
+        _mode = 1;
+        UIViewController *vc = [[VSContext sharedContext] topViewController];
+        if (!vc) { VSToast(@"Không tìm thấy màn hình để chọn ảnh"); return; }
+        [vc presentViewController:[self pickerWithLimit:1] animated:YES completion:nil];
+        return;
+    }
+    NSItemProvider *provider = _qrResults[pos].itemProvider;
+    if (![provider canLoadObjectOfClass:[UIImage class]]) {
+        [self decodeQRAt:pos + 1 generation:generation];
+        return;
+    }
+    [provider loadObjectOfClass:[UIImage class] completionHandler:^(UIImage *image, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *code = image ? [self codeFromImage:image] : nil;
+            if (code.length && ![self->_codes containsObject:code]) [self->_codes addObject:code];
+            [self decodeQRAt:pos + 1 generation:generation];
+        });
+    }];
+}
+
+- (void)runNext:(NSUInteger)generation {
+    if (generation != _generation || !_image) return;
+    if (_index >= _codes.count) {
+        VSToast([NSString stringWithFormat:@"Đã chạy xong %lu code", (unsigned long)_codes.count]);
+        return;
+    }
+    NSString *code = _codes[_index];
+    NSUInteger item = _index + 1;
+    VSToast([NSString stringWithFormat:@"Đang nhập code %lu/%lu", (unsigned long)item, (unsigned long)_codes.count]);
+    if (![[VSContext sharedContext] applyImportedCode:code]) {
+        VSToast(@"Không thể nhập code: hãy mở Multi Layer trước");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (generation != self->_generation) return;
+        NSMutableArray<NSNumber *> *targets = [NSMutableArray array];
+        for (VSLayerInfo *info in [[VSContext sharedContext] mediaCandidates]) {
+            [targets addObject:@(info.number)];
+        }
+        if (targets.count) [[VSContext sharedContext] applyImage:self->_image toLayers:targets];
+        self->_index++;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [self runNext:generation]; });
+    });
+}
+
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    NSUInteger generation = _generation;
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    if (_mode == 0) {
+        if (results.count == 0) { VSToast(@"Chưa chọn ảnh QR"); return; }
+        _qrResults = [results copy];
+        [self decodeQRAt:0 generation:generation];
+        return;
+    }
+    PHPickerResult *result = results.firstObject;
+    if (!result || ![result.itemProvider canLoadObjectOfClass:[UIImage class]]) {
+        VSToast(@"Chưa chọn ảnh cần nhập");
+        return;
+    }
+    [result.itemProvider loadObjectOfClass:[UIImage class] completionHandler:^(UIImage *image, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self->_generation || !image) { VSToast(@"Không đọc được ảnh cần nhập"); return; }
+            self->_image = image;
+            self->_index = 0;
+            [self runNext:generation];
+        });
+    }];
+}
+
 @end
 
 @interface VSCodeStore ()
@@ -827,6 +962,14 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     [self refreshEditor];
 }
 
+- (BOOL)applyImportedCode:(NSString *)code {
+    UIViewController *vc = [self multiLayerViewController];
+    SEL sel = @selector(importedData:code:);
+    if (!vc || !code.length || ![vc respondsToSelector:sel]) return NO;
+    ((void (*)(id, SEL, id, id))objc_msgSend)(vc, sel, nil, code);
+    return YES;
+}
+
 @end
 
 // =====================================================================
@@ -923,6 +1066,7 @@ UIImage *VSMakeQRImage(NSString *code) {
     BOOL _video;
     BOOL _awaiting;
     NSUInteger _pollAttempts;
+    BOOL _pickerWasVisible;
 }
 
 + (instancetype)sharedSession {
@@ -955,6 +1099,7 @@ UIImage *VSMakeQRImage(NSString *code) {
     _active = YES;
     _awaiting = NO;
     _pollAttempts = 0;
+    _pickerWasVisible = NO;
     _generation++;
     VSLog(@"bắt đầu nhập %@ cho %lu lớp", video ? @"video" : @"ảnh", (unsigned long)targets.count);
     [self updateBanner];
@@ -965,6 +1110,7 @@ UIImage *VSMakeQRImage(NSString *code) {
     _active = NO;
     _awaiting = NO;
     _pollAttempts = 0;
+    _pickerWasVisible = NO;
     _generation++;
     _targets = nil;
     _index = 0;
@@ -1058,23 +1204,24 @@ UIImage *VSMakeQRImage(NSString *code) {
     }
 }
 
-// Polling mỗi 0.5 giây: kiểm tra layer mục tiêu đã có nội dung chưa.
-// Nếu có → app đã gán xong media → chuyển lớp tiếp.
-// Nếu quá 15 giây (30 lần) vẫn không có → coi như người dùng hủy picker → bỏ qua.
+// Không kiểm tra origAssetInfo: preset đã nhập code có thể đã có asset nên sẽ
+// bị coi là "xong" ngay. Chỉ đi tiếp sau khi picker gốc đã thực sự hiện rồi đóng.
 - (void)startPolling:(NSUInteger)gen {
     if (!self->_active || !self->_awaiting) return;
 
     _pollAttempts++;
-    unsigned long long layer = [self currentLayer];
-    BOOL hasContent = [[VSContext sharedContext] layerHasContent:layer];
+    UIViewController *vc = [[VSContext sharedContext] multiLayerViewController];
+    BOOL pickerVisible = vc.presentedViewController != nil ||
+                         vc.navigationController.presentedViewController != nil;
+    if (pickerVisible) _pickerWasVisible = YES;
 
-    if (hasContent) {
+    if (_pickerWasVisible && !pickerVisible) {
         [self layerReady:gen];
         return;
     }
 
     if (_pollAttempts >= 30) { // 30 * 0.5s = 15s
-        VSLog(@"poll timeout cho lớp %llu", layer);
+        VSLog(@"picker timeout cho lớp %llu", [self currentLayer]);
         [self skipLayer:gen];
         return;
     }

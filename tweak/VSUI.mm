@@ -121,7 +121,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
 - (UIView *)latestCodeCard:(VSCodeEntry *)entry;
 - (UIView *)clipboardRow;
 - (void)showQRForCode:(NSString *)code;
-- (void)addProDiagSection;
+- (void)startBatchImport;
 @end
 
 @implementation VSPanelView {
@@ -370,9 +370,9 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     return box;
 }
 
-// ---------- chẩn đoán Pro (đọc IMP + _dyld — không hook gì) ----------
+// ---------- chẩn đoán Pro (đã ẩn khỏi UI) ----------
 
-- (void)addProDiagSection {
+- (void)_unusedProDiagSection {
     [_stack addArrangedSubview:[self sectionLabel:@"Chẩn đoán Pro 🔍"]];
 
     NSArray<NSDictionary *> *rows = VSProStatus();
@@ -507,8 +507,6 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     BOOL inEditor = [ctx isInMultiLayerEditor];
     NSArray<VSLayerInfo *> *cands = inEditor ? [ctx candidatesForVideo:NO] : @[];
 
-    [self addProDiagSection];
-
     [_stack addArrangedSubview:[self hintLabel:
         inEditor
         ? [NSString stringWithFormat:@"Đang ở trình chỉnh lớp • %lu lớp có thể nhập", (unsigned long)cands.count]
@@ -528,6 +526,12 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
                                    icon:@"checklist"
                                   color:nil
                                  action:^{ [weakSelf openLayerPicker]; }]];
+
+    [_stack addArrangedSubview:[self row:@"Tự động QR → nhập ảnh"
+                               subtitle:@"Chọn dãy ảnh QR, rồi chọn 1 ảnh để gán sau mỗi code"
+                                   icon:@"qrcode.viewfinder"
+                                  color:nil
+                                 action:^{ [weakSelf startBatchImport]; }]];
 
     [_stack addArrangedSubview:[self sectionLabel:@"Code gần đây"]];
 
@@ -600,6 +604,11 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     footer.font = [UIFont systemFontOfSize:11.5];
     footer.alpha = 0.7;
     [_stack addArrangedSubview:footer];
+}
+
+- (void)startBatchImport {
+    [[VSUI sharedUI] hidePanel];
+    [[VSBatchImport sharedImport] start];
 }
 
 // ---------- chọn lớp & nhập ảnh tự động ----------

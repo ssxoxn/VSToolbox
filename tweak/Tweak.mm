@@ -1,6 +1,6 @@
 //
 //  Tweak.mm
-//  Điểm vào: chẩn đoán Pro + cài UI sau khi app khởi tạo xong.
+//  Điểm vào: cài UI sau khi app khởi tạo xong.
 //  KHÔNG hook method nào của app: bắt code bằng cách đọc QRCodes.plist
 //  → không xung đột với VSPlusUltra / VSFix1-4 / CydiaSubstrate.
 //
@@ -22,22 +22,6 @@ static void VSToolboxInit(void) {
                         object:nil
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(NSNotification *note) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                // Log chẩn đoán (Cần Console.app để xem) — nội dung tương tự
-                // card "Chẩn đoán Pro" trong panel nên không bắt buộc log.
-                for (NSDictionary *row in VSProStatus()) {
-                    VSLog(@"[Diag] %@ → %@%@",
-                          row[@"member"],
-                          row[@"missing"] ? @"THIẾU" : row[@"owner"],
-                          row[@"missing"] ? @"" : ([row[@"ok"] boolValue]
-                                                  ? @" ✓" : @" ⚠ MAIN EXE"));
-                }
-                NSInteger total = 0;
-                NSArray<NSString *> *dylibs = VSLoadedDylibs(&total);
-                VSLog(@"[Diag] %ld ảnh nạp, %lu ảnh app-dylib: %@",
-                      (long)total, (unsigned long)dylibs.count,
-                      [dylibs componentsJoinedByString:@", "]);
-            });
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 [[VSUI sharedUI] install];
