@@ -226,6 +226,136 @@ NSArray<NSString *> *VSLoadedDylibs(NSInteger *outTotal) {
     return custom;
 }
 
+// ---------- probe runtime: giá trị THẬT các getter Pro trả về ----------
+// Gọi getter bị hook của StoreModel trên 1 instance riêng (không hook,
+// không sửa method) để biết hook có trả "đã mua" thật hay bị chặn điều kiện.
+
+static id VSRuntimeModel(void) {
+    static id model = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class store = objc_getClass("StoreModel");
+        if (!store) return;
+        @try {
+            model = [[store alloc] init];
+        } @catch (NSException *e) {
+            VSLog(@"probe: alloc StoreModel lỗi: %@", e.reason);
+            model = nil;
+        }
+    });
+    return model;
+}
+
+static void VSRuntimePut(NSMutableDictionary *out, NSString *key, NSString *value) {
+    if (!value || value.length == 0) value = @"(rỗng)";
+    if (value.length > 160) value = [[value substringToIndex:160] stringByAppendingString:@"…"];
+    out[key] = value;
+}
+
+NSDictionary<NSString *, NSString *> *VSProRuntimeValues(void) {
+    id model = VSRuntimeModel();
+    if (!model) {
+        return @{@"StoreModel": @"KHÔNG tạo được instance"};
+    }
+    NSMutableDictionary<NSString *, NSString *> *out = [NSMutableDictionary dictionary];
+
+    // getter BOOL không tham số
+    NSArray<NSString *> *boolNone = @[
+        @"proFeaturesUnlocked", @"subscriptionActive", @"autoRenewON",
+        @"hasOwnedMonthPro", @"hasOwnedQuarterPro", @"hasOwnedYearPro",
+        @"hasOwnedMonthProWithTrial", @"hasOwnedYearProWithTrial",
+        @"isAppStoreReceiptSandbox", @"hasEmbeddedMobileProvision",
+    ];
+    for (NSString *s in boolNone) {
+        @try {
+            BOOL b = ((BOOL (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(s));
+            out[s] = b ? @"YES" : @"NO";
+        } @catch (NSException *e) {
+            out[s] = [@"lỗi: " stringByAppendingString:e.reason ?: @"?"];
+        }
+    }
+
+    // getter unsigned với/không tham số
+    @try {
+        unsigned long long c = ((unsigned long long (*)(id, SEL))objc_msgSend)(
+            model, NSSelectorFromString(@"purchasedCount"));
+        out[@"purchasedCount"] = [NSString stringWithFormat:@"%llu", c];
+    } @catch (NSException *e) {
+        out[@"purchasedCount"] = @"lỗi";
+    }
+
+    // ownsProduct: / numberOfTheseProductsOwned: với từng ID sản phẩm Pro
+    NSArray<NSString *> *productIDs = @[
+        @"CinemaProVS", @"TilePopPackVS", @"MultiLayerBundleVS",
+        @"VSMotionBlurVS", @"MonthlyUnlockVS", @"HalfYearUnlockVS",
+        @"OneYearUnlockVS",
+    ];
+    NSString *ownedJoined = @"";   // (không dùng ngay — giữ cho lần debug sau)
+    (void)ownedJoined;
+    for (NSString *pid in productIDs) {
+        @try {
+            BOOL owned = ((BOOL (*)(id, SEL, id))objc_msgSend)(
+                model, NSSelectorFromString(@"ownsProduct:"), pid);
+            out[[@"ownsProduct:" stringByAppendingString:pid]] =
+                owned ? @"YES" : @"NO";
+        } @catch (NSException *e) {
+            out[[@"ownsProduct:" stringByAppendingString:pid]] = @"lỗi";
+        }
+    }
+
+    // ownedProducts → mảng gì?
+    @try {
+        id arr = ((id (*)(id, SEL))objc_msgSend)(
+            model, NSSelectorFromString(@"ownedProducts"));
+        if ([arr isKindOfClass:[NSArray class]]) {
+            NSArray *a = (NSArray *)arr;
+            out[@"ownedProducts"] = [NSString stringWithFormat:
+                @"NSArray(%lu): %@", (unsigned long)a.count,
+                [a.firstObject description] ?: @"(rỗng)"];
+        } else {
+            VSRuntimePut(out, @"ownedProducts",
+                         [arr isKindOfClass:[NSString class]]
+                             ? arr : [arr description] ?: @"(nil)");
+        }
+    } @catch (NSException *e) {
+        out[@"ownedProducts"] = @"lỗi";
+    }
+
+    // unownedProductIDs → số sản phẩm "chưa mua" theo app
+    @try {
+        id arr = ((id (*)(id, SEL))objc_msgSend)(
+            model, NSSelectorFromString(@"unownedProductIDs"));
+        if ([arr isKindOfClass:[NSArray class]]) {
+            out[@"unownedProductIDs"] = [NSString stringWithFormat:
+                @"NSArray(%lu)", (unsigned long)[(NSArray *)arr count]];
+        } else {
+            out[@"unownedProductIDs"] = arr ? @"(không phải array)" : @"(nil)";
+        }
+    } @catch (NSException *e) {
+        out[@"unownedProductIDs"] = @"lỗi";
+    }
+
+    // NSUserDefaults: các key có thể liên quan công tắc Pro của Ultra
+    @try {
+        NSDictionary *all = [[NSUserDefaults standardUserDefaults]
+                             dictionaryRepresentation];
+        NSMutableArray<NSString *> *hits = [NSMutableArray array];
+        for (NSString *key in all) {
+            NSString *lk = key.lowercaseString;
+            if ([lk containsString:@"vs"] || [lk containsString:@"ultra"] ||
+                [lk containsString:@"plus"] || [lk containsString:@"pro"] ||
+                [lk containsString:@"switch"] || [lk containsString:@"unlock"]) {
+                id v = all[key];
+                VSRuntimePut(out, [@"Defaults." stringByAppendingString:key],
+                             [v description] ?: @"?");
+                [hits addObject:key];
+            }
+        }
+    } @catch (NSException *e) {}
+
+    return out;
+}
+
 // =====================================================================
 // MARK: - Lịch sử code (tự động bắt từ app + nhập thủ công)
 // =====================================================================

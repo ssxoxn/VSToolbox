@@ -118,3 +118,6 @@ NSArray<NSDictionary *> *VSProStatus(void);
 // Danh sách tên file dylib/ảnh KHÔNG thuộc hệ thống đang nạp trong tiến trình.
 // outTotal tương ứng toàn bộ _dyld_image_count().
 NSArray<NSString *> *VSLoadedDylibs(NSInteger *outTotal);
+// Probe runtime: gọi getter Pro của StoreModel (đã hook bởi Ultra) và trả
+// về {"tên": "giá trị"} để thấy hook có trả "đã mua" thật không.
+NSDictionary<NSString *, NSString *> *VSProRuntimeValues(void);

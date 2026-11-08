@@ -419,7 +419,9 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         BOOL missing = [row[@"missing"] boolValue];
         BOOL ok = [row[@"ok"] boolValue];
         NSString *mark = missing ? @"?" : (ok ? @"✓" : @"✗");
-        NSString *detail = missing ? @"(thiếu IMP)" : row[@"owner"];
+        NSString *owner = row[@"owner"];
+        NSString *detail = missing ? @"(thiếu IMP)"
+            : (owner.length ? owner : @"(không rõ image)");
         UILabel *line = [[UILabel alloc] init];
         line.translatesAutoresizingMaskIntoConstraints = NO;
         line.text = [NSString stringWithFormat:@"%@ %@ — %@", mark,
@@ -459,6 +461,34 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         if (vc) [vc presentViewController:alert animated:YES completion:nil];
     }] forControlEvents:UIControlEventTouchUpInside];
     [v addArrangedSubview:dylibRow];
+
+    // Nút probe runtime: gọi getter Pro (đã hook) và hiện giá trị trả về
+    UIButton *probeRow = [UIButton buttonWithType:UIButtonTypeSystem];
+    probeRow.translatesAutoresizingMaskIntoConstraints = NO;
+    UIButtonConfiguration *pcfg = [UIButtonConfiguration plainButtonConfiguration];
+    pcfg.title = @"Probe giá trị Pro (runtime)";
+    pcfg.image = [UIImage systemImageNamed:@"stethoscope"];
+    pcfg.imagePadding = 6;
+    pcfg.baseForegroundColor = VSPinkDeep();
+    pcfg.contentInsets = NSDirectionalEdgeInsetsMake(8, 0, 8, 0);
+    probeRow.configuration = pcfg;
+    [probeRow addAction:[UIAction actionWithHandler:^(UIAction *a) {
+        NSDictionary<NSString *, NSString *> *vals = VSProRuntimeValues();
+        NSMutableArray<NSString *> *lines = [NSMutableArray array];
+        for (NSString *key in vals) {
+            [lines addObject:[NSString stringWithFormat:@"%@ = %@",
+                              key, vals[key]]];
+        }
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Giá trị Pro runtime"
+            message:[lines componentsJoinedByString:@"\n"]
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction
+            actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+        UIViewController *vc = [[VSContext sharedContext] topViewController];
+        if (vc) [vc presentViewController:alert animated:YES completion:nil];
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [v addArrangedSubview:probeRow];
 
     [NSLayoutConstraint activateConstraints:@[
         [v.topAnchor constraintEqualToAnchor:card.topAnchor constant:10],
