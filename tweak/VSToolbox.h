@@ -89,6 +89,8 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 - (void)refreshEditor;
 - (void)removeContentFromLayer:(unsigned long long)number;
 - (void)applyImage:(UIImage *)image toLayers:(NSArray<NSNumber *> *)layers;
+- (BOOL)layerHasContent:(unsigned long long)number;
+- (void)dismissPresentedPicker;
 @end
 
 // ---- UI ----
@@ -107,6 +109,3 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 
 // ---- Tạo QR image từ code ----
 UIImage *VSMakeQRImage(NSString *code);
-
-// ---- Cài đặt hook ----
-void VSToolboxInstallHooks(void);

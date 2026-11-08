@@ -1,7 +1,7 @@
 //
 //  Tweak.mm
-//  Điểm vào: chỉ cài hook + UI, không dùng Logos/%hook (app ký doanh nghiệp
-//  không có CydiaSubstrate, nên mọi thứ chạy bằng method_setImplementation).
+//  Điểm vào: chỉ cài UI, không dùng Logos/%hook và không swizzle method nào của app
+//  (để chạy song song với VSPlusUltra / VSFix / CydiaSubstrate đã có sẵn trong IPA).
 //
 
 #import "VSToolbox.h"
@@ -15,20 +15,21 @@ static void VSToolboxInit(void) {
         }
 
         VSLog(@"đang nạp vào %@", bundleID);
-        VSToolboxInstallHooks();
+
+        // Không còn gọi VSToolboxInstallHooks() — không swizzle method app,
+        // tránh xung đột với dylib đã tiêm sẵn (VSPlusUltra, VSFix1-4, CydiaSubstrate).
 
         [[NSNotificationCenter defaultCenter]
-            addObserverForName:UIApplicationDidBecomeActiveNotification
+            addObserverForName:UIApplicationDidFinishLaunchingNotification
                         object:nil
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(NSNotification *note) {
-            static dispatch_once_t once;
-            dispatch_once(&once, ^{
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    [[VSUI sharedUI] install];
-                });
-            });
+            [[VSUI sharedUI] install];
         }];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [[VSUI sharedUI] install];
+        });
     }
 }

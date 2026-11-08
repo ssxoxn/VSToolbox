@@ -5,11 +5,12 @@ nhỏ mở bảng công cụ tiếng Việt, màu hồng:
 
 - **Nhập ảnh / video hàng loạt** vào các lớp media của preset, dùng **picker gốc của app**
   (giống hệt thao tác thêm ảnh bình thường) — chọn tất cả lớp hoặc tự chọn từng lớp.
-- **Hiện 2 code gần đây nhất** đã nhập, chạm để copy.
+- **Nhập code thủ công** và lưu 2 code gần đây nhất, chạm để copy.
 - Banner tiến trình có nút **Bỏ qua / Dừng** ngay trên màn hình picker.
 
 > Chỉ phục vụ thao tác nhập liệu cá nhân. Không can thiệp IAP, license, watermark hay
-> bất kỳ cơ chế bản quyền nào của app. Không sửa các dylib có sẵn trong IPA nguồn.
+> bất kỳ cơ chế bản quyền nào của app. **Không sửa, không xóa các dylib có sẵn trong IPA nguồn**
+> (VSPlusUltra, VSFix1-4, CydiaSubstrate).
 
 ---
 
@@ -18,9 +19,9 @@ nhỏ mở bảng công cụ tiếng Việt, màu hồng:
 ```
 tweak/
   VSToolbox.h     khai báo chung
-  VSCore.mm       màu, helper, lịch sử code, quét lớp, phiên nhập hàng loạt, hook
+  VSCore.mm       màu, helper, lịch sử code, quét lớp, phiên nhập hàng loạt (polling)
   VSUI.mm         nút nổi, panel, banner, toast
-  Tweak.mm        constructor (chỉ cài hook + UI, không dùng Logos)
+  Tweak.mm        constructor (chỉ cài UI, không dùng Logos, không swizzle)
   Makefile        build ra dist/VSToolbox.dylib
 tools/
   inject.py       chèn LC_LOAD_DYLIB vào IPA (không dịch file)
@@ -29,8 +30,9 @@ tools/
 .github/workflows/build.yml   build trên GitHub Actions
 ```
 
-Không dùng `%hook`/Logos và **không link libsubstrate** — app ký doanh nghiệp không có
-CydiaSubstrate, nên mọi hook chạy bằng `method_setImplementation`.
+**Quan trọng:** Tweak này **không dùng `method_setImplementation`**, không swizzle method nào
+của app. Do đó có thể chạy song song với VSPlusUltra.dylib, VSFix1-4.dylib và CydiaSubstrate
+đã có sẵn trong IPA nguồn mà không gây crash.
 
 ## 2. Build
 
@@ -79,43 +81,41 @@ không ghi đè).
 2. Cài lên iPhone 15 (iOS 17.6.1).
 3. Mở Video Star → thấy nút **🌸** nổi ở cạnh phải màn hình.
 
-Nếu app bị crash ngay khi mở, xem mục 7 để lấy log.
-
 ## 5. Dùng trong app
 
 1. Mở một preset / dự án có nhiều lớp (**Multi Layer**).
 2. Chạm 🌸 → panel:
-   - **Ảnh — tất cả lớp**: lần lượt mở picker ảnh gốc của app cho từng lớp media.
-   - **Video — tất cả lớp**: tương tự với picker video.
-   - **Chọn lớp để nhập ảnh / video**: bật/tắt từng lớp rồi bấm **Bắt đầu**.
+   - **Ảnh — Tự động nhập tất cả lớp**: chọn 1 ảnh duy nhất → tự gán vào toàn bộ các lớp ảnh.
+   - **Chọn lớp để nhập ảnh**: bật/tắt từng lớp rồi bấm **Bắt đầu** → gán 1 ảnh vào các lớp đã chọn.
 3. Với mỗi lớp: chọn ảnh/video trong picker → app gán nội dung → tweak tự chuyển sang lớp
    tiếp theo và mở picker lại.
 4. Banner trên cùng hiện `Nhập ảnh • lớp 5 (2/7)` kèm **Bỏ qua** và **Dừng** — bấm được
    ngay cả khi đang mở picker.
-5. Code: mỗi lần app nhập code (hoặc lưu code vào thư viện QR), code được lưu lại. Mở
-   panel → mục **Code gần đây** (tối đa 2) → chạm để copy.
+5. Code: mục **Code gần đây** (tối đa 2) → chạm để copy. Nếu muốn thêm code mới, dùng
+   mục **Nhập code thủ công** → gõ code → bấm **Lưu**.
 
 ### Lớp nào được coi là "media"?
 
 Được chọn khi **không** phải: lớp trống (`isNullLayer`), lớp văn bản (`textDictionary`),
-lớp 3D (`is3DLayer`), lớp overlay / GIF / zap / particle / drawing. Nội dung được gán bằng
-chính `layerType` của lớp đó nên không cần hardcode enum.
+lớp 3D (`is3DLayer`), lớp overlay / GIF / zap / particle / drawing.
 
 ### Tuỳ chọn "Ưu tiên thay nội dung lớp đang chọn"
 
 - **Bật (mặc định)**: gọi luồng *thay nội dung* của app cho lớp đang chọn
   (`selectLayerNum:flash:` + `pickNewContent`). Nếu app không mở picker, tweak tự fallback
   sang `showPhotoPicker`.
-- **Tắt**: luôn dùng nút thêm ảnh mặc định (`showPhotoPicker`). Khi đó app tạo lớp mới,
-  tweak copy nội dung sang đúng lớp đích rồi dọn lớp tạm.
+- **Tắt**: luôn dùng nút thêm ảnh mặc định (`showPhotoPicker`).
 
 ## 6. Giới hạn đã biết
 
 - Tweak dựa trên selector nội bộ của bản 15.0.3; app update có thể đổi tên → luôn có
   `respondsToSelector:` + fallback, nhưng vẫn nên build lại và test.
-- Chưa tự động áp code vào project (chỉ hiển thị/copy) — tránh rủi ro phá state.
+- **Không tự động bắt code từ app** (để tránh xung đột với VSPlusUltra). Code chỉ được lưu
+  khi người dùng nhập thủ công qua mục "Nhập code thủ công".
 - Không hỗ trợ preset có hơn 41 lớp (quét 0..40).
 - Thứ tự nhập = thứ tự lớp tăng dần.
+- Bulk import dùng polling (kiểm tra mỗi 0.5 giây layer đã có nội dung chưa), timeout 15 giây
+  cho mỗi lớp. Nếu người dùng hủy picker, tweak sẽ bỏ qua lớp đó sau 15 giây.
 - IPA nguồn đã có sẵn `VSPlusUltra.dylib` và `VSFix1..4.dylib`; tweak này **không** đụng tới
   chúng.
 
@@ -124,11 +124,8 @@ chính `layerType` của lớp đó nên không cần hardcode enum.
 - Log: Xcode → **Window → Devices and Simulators → Open Console**, lọc `VSToolbox`.
 - Nếu nút 🌸 không hiện: kiểm tra log có dòng `UI đã cài` chưa; nếu chưa, app có thể chưa
   tạo `UIWindowScene` (thử mở app lại).
-- Nếu hook code không bắt được: log sẽ có `hook importedData:code: ở N class`; nếu N = 0,
-  bản app đã đổi selector → cần cập nhật `VSCore.mm`.
-- Nếu nhập hàng loạt không tự chuyển lớp: log `nhận ảnh cho lớp ...` sẽ cho biết app có gọi
-  `setupImage:layerNum:layerType:clearMask:` hay không. Nếu không, tắt tuỳ chọn "Ưu tiên
-  thay nội dung" để dùng luồng thêm lớp mặc định.
+- Nếu nhập hàng loạt không tự chuyển lớp: tweak sẽ log `poll timeout cho lớp ...` sau 15 giây.
+  Có thể người dùng đã hủy picker — bấm **Bỏ qua** trên banner để chuyển lớp tiếp.
 
 ## 8. Ghi chú pháp lý / an toàn
 

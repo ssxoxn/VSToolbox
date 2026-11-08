@@ -1,19 +1,17 @@
 //
 //  VSCore.mm
-//  Phần lõi: màu sắc, helper gọi method, quản lý code, quét lớp và gán ảnh.
-//  Thiết kế độc lập: không hook chồng chéo lên QRCodeManager / MultiLayerWiz
-//  để đảm bảo không gây lỗi nạp code hay xung đột với VSPlusUltra.dylib.
+//  Phần lõi: màu, helper, lịch sử code, quét lớp, phiên nhập hàng loạt (polling, không swizzle).
+//  Không dùng method_setImplementation → không xung đột với VSPlusUltra / VSFix / CydiaSubstrate.
 //
 
 #import "VSToolbox.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <CoreImage/CoreImage.h>
 #import <stdlib.h>
 #import <string.h>
 
 // =====================================================================
-// MARK: - Màu sắc
+// MARK: - Màu
 // =====================================================================
 
 UIColor *VSPink(void) {
@@ -137,12 +135,16 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v) {
 }
 
 // =====================================================================
-// MARK: - Lịch sử code & Tự động nhận diện Clipboard
+// MARK: - Lịch sử code (chỉ lưu khi người dùng nhập thủ công từ UI)
 // =====================================================================
 
-static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
+static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 
 @implementation VSCodeEntry
+@end
+
+@interface VSCodeStore ()
+- (NSArray<NSDictionary *> *)rawEntries;
 @end
 
 @implementation VSCodeStore
@@ -150,30 +152,8 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
 + (instancetype)sharedStore {
     static VSCodeStore *store = nil;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        store = [[VSCodeStore alloc] init];
-    });
+    dispatch_once(&once, ^{ store = [[VSCodeStore alloc] init]; });
     return store;
-}
-
-- (void)checkClipboard {
-    @try {
-        UIPasteboard *pb = [UIPasteboard generalPasteboard];
-        if (!pb.hasStrings) return;
-        NSString *clip = pb.string;
-        if (![clip isKindOfClass:[NSString class]]) return;
-        NSString *trimmed = [clip stringByTrimmingCharactersInSet:
-                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmed.length < 6 || trimmed.length > 512) return;
-
-        NSArray<VSCodeEntry *> *current = [self entries];
-        if (current.count > 0 && [current[0].code isEqualToString:trimmed]) {
-            return; // Đã là code mới nhất
-        }
-        [self addCode:trimmed source:@"Clipboard"];
-    } @catch (NSException *e) {
-        VSLog(@"Clipboard check error: %@", e.reason);
-    }
 }
 
 - (NSArray<NSDictionary *> *)rawEntries {
@@ -226,7 +206,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
     [[NSUserDefaults standardUserDefaults] setObject:list forKey:kVSCodesKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
-    VSLog(@"Đã lưu code mới: %@ (%@)", trimmed, source ?: @"?");
+    VSLog(@"code mới: %@ (%@)", trimmed, source ?: @"?");
     dispatch_async(dispatch_get_main_queue(), ^{
         [[VSUI sharedUI] refreshPanel];
     });
@@ -243,7 +223,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
 @end
 
 // =====================================================================
-// MARK: - Thông tin lớp (Layer Info)
+// MARK: - Layer info
 // =====================================================================
 
 @implementation VSLayerInfo
@@ -268,55 +248,17 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
 @end
 
 // =====================================================================
-// MARK: - Trình chọn ảnh (VSImagePicker)
-// =====================================================================
-
-@implementation VSImagePicker {
-    void (^_completion)(UIImage *);
-}
-
-+ (instancetype)sharedPicker {
-    static VSImagePicker *p = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ p = [[VSImagePicker alloc] init]; });
-    return p;
-}
-
-- (void)pickImageFrom:(UIViewController *)vc completion:(void (^)(UIImage *image))completion {
-    _completion = [completion copy];
-    UIImagePickerController *picker = [[UIImagePickerController alloc] init];
-    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-    picker.delegate = self;
-    picker.modalPresentationStyle = UIModalPresentationFullScreen;
-    [vc presentViewController:picker animated:YES completion:nil];
-}
-
-- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
-    UIImage *img = info[UIImagePickerControllerOriginalImage];
-    void (^cb)(UIImage *) = _completion;
-    _completion = nil;
-    [picker dismissViewControllerAnimated:YES completion:^{
-        if (cb && img) {
-            cb(img);
-        }
-    }];
-}
-
-- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
-    _completion = nil;
-    [picker dismissViewControllerAnimated:YES completion:nil];
-}
-
-@end
-
-// =====================================================================
-// MARK: - Ngữ cảnh MultiLayer (VSContext)
+// MARK: - VSContext
 // =====================================================================
 
 @interface VSContext ()
 - (UIWindow *)appWindow;
 - (BOOL)isMultiLayerVC:(UIViewController *)vc;
 - (UIViewController *)searchMultiLayerIn:(UIViewController *)vc depth:(int)depth;
+- (void)openPhotoPicker;
+- (void)openVideoPicker;
+- (void)dismissPresentedPicker;
+- (BOOL)layerHasContent:(unsigned long long)number;
 @end
 
 @implementation VSContext
@@ -334,7 +276,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
     NSArray *windows = [UIApplication sharedApplication].windows;
     for (UIWindow *w in windows) {
         if (![w isKindOfClass:[UIWindow class]]) continue;
-        if (w.tag == 0x56535442) continue;                  // Bỏ qua cửa sổ floating của tweak
+        if (w.tag == 0x56535442) continue;                  // cửa sổ của tweak
         if (w.hidden || w.alpha < 0.01) continue;
         if (!w.rootViewController) continue;
 
@@ -346,9 +288,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
 
 - (UIViewController *)topViewController {
     UIViewController *vc = [self appWindow].rootViewController;
-    while (vc.presentedViewController && !vc.presentedViewController.isBeingDismissed) {
-        vc = vc.presentedViewController;
-    }
+    while (vc.presentedViewController) vc = vc.presentedViewController;
     if ([vc isKindOfClass:[UINavigationController class]]) {
         vc = [(UINavigationController *)vc visibleViewController];
     }
@@ -440,17 +380,13 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
     return out;
 }
 
-- (NSArray<VSLayerInfo *> *)mediaCandidates {
+- (NSArray<VSLayerInfo *> *)candidatesForVideo:(BOOL)video {
+    (void)video;
     NSMutableArray<VSLayerInfo *> *out = [NSMutableArray array];
     for (VSLayerInfo *info in [self scanLayers]) {
         if ([info isMediaCandidate]) [out addObject:info];
     }
     return out;
-}
-
-- (NSArray<VSLayerInfo *> *)candidatesForVideo:(BOOL)video {
-    (void)video;
-    return [self mediaCandidates];
 }
 
 - (int)layerTypeFor:(unsigned long long)number {
@@ -467,7 +403,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
     SEL sel = @selector(selectLayerNum:flash:);
     if ([vc respondsToSelector:sel]) {
         VSCallVoidULLBool(vc, sel, number, YES);
-        VSLog(@"Chọn lớp %llu", number);
+        VSLog(@"chọn lớp %llu", number);
     }
 }
 
@@ -486,76 +422,377 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v2";
     if ([vc respondsToSelector:sel]) VSCallVoidULLBool(vc, sel, number, YES);
 }
 
-// Gán 1 ảnh trực tiếp vào danh sách các lớp đã chọn
-- (void)applyImage:(UIImage *)image toLayers:(NSArray<NSNumber *> *)layers {
-    if (!image || layers.count == 0) return;
+- (void)openPhotoPicker {
+    UIViewController *vc = [self multiLayerViewController];
+    if (!vc) return;
+    VSCallVoid(vc, @selector(showPhotoPicker));
+}
+
+- (void)openVideoPicker {
+    UIViewController *vc = [self multiLayerViewController];
+    if (!vc) return;
+    if ([vc respondsToSelector:@selector(presentImportVideo)]) {
+        VSCallVoid(vc, @selector(presentImportVideo));
+    } else {
+        VSCallVoid(vc, @selector(importVideo));
+    }
+}
+
+// Đóng picker mà app đang present (dùng khi người dùng bấm Bỏ qua / Dừng).
+- (void)dismissPresentedPicker {
+    UIViewController *vc = [self multiLayerViewController];
+    if (!vc) return;
+    UIViewController *presented = vc.presentedViewController;
+    if (!presented) presented = vc.navigationController.presentedViewController;
+    if (!presented) return;
+    VSLog(@"đóng picker đang mở");
+    [presented dismissViewControllerAnimated:YES completion:nil];
+}
+
+// Kiểm tra layer đã có nội dung (origAssetInfo != nil) hay chưa.
+// Dùng cho polling sau khi gọi picker của app.
+- (BOOL)layerHasContent:(unsigned long long)number {
     id engine = [self engine];
-    if (!engine) {
-        VSToast(@"Hãy mở trình chỉnh lớp (Multi Layer) trước");
-        return;
-    }
-
-    SEL sel = @selector(setupImage:layerNum:layerType:clearMask:);
-    if (![engine respondsToSelector:sel]) {
-        VSToast(@"Bản app này không hỗ trợ gán ảnh tự động");
-        return;
-    }
-
-    NSUInteger count = 0;
-    for (NSNumber *num in layers) {
-        unsigned long long n = [num unsignedLongLongValue];
-        int type = [self layerTypeFor:n];
-        @try {
-            ((id (*)(id, SEL, id, unsigned long long, int, BOOL))objc_msgSend)
-                (engine, sel, image, n, type, NO);
-            count++;
-        } @catch (NSException *e) {
-            VSLog(@"Lỗi gán ảnh lớp %llu: %@", n, e.reason);
-        }
-    }
-
-    [self refreshEditor];
-    VSToast([NSString stringWithFormat:@"Đã nhập ảnh vào %lu lớp! 🌸", (unsigned long)count]);
+    if (!engine) return NO;
+    id layer = VSCallULL(engine, @selector(layerAtLayerNum:), number);
+    if (!layer || [layer isKindOfClass:[NSNull class]]) return NO;
+    return VSCall0(layer, @selector(origAssetInfo)) != nil;
 }
 
 @end
 
 // =====================================================================
-// MARK: - Tạo QR image từ code (Native CIQRCodeGenerator)
+// MARK: - Phiên nhập hàng loạt (polling, không swizzle)
 // =====================================================================
 
-UIImage *VSMakeQRImage(NSString *code) {
-    if (![code isKindOfClass:[NSString class]] || code.length == 0) return nil;
+@interface VSBulkSession ()
+- (void)openPickerForCurrent;
+- (void)invokePickerOn:(UIViewController *)vc generation:(NSUInteger)gen;
+- (void)updateBanner;
+- (void)startPolling:(NSUInteger)gen;
+- (void)layerReady:(NSUInteger)gen;
+- (void)skipLayer:(NSUInteger)gen;
+- (void)finish;
+- (void)stopWithMessage:(NSString *)message;
+@end
 
-    @try {
-        NSData *data = [code dataUsingEncoding:NSISOLatin1StringEncoding];
-        if (!data) data = [code dataUsingEncoding:NSUTF8StringEncoding];
-        if (!data) return nil;
+@implementation VSBulkSession {
+    NSArray<NSNumber *> *_targets;
+    NSUInteger _index;
+    NSUInteger _done;
+    NSUInteger _generation;
+    BOOL _active;
+    BOOL _video;
+    BOOL _awaiting;
+    NSUInteger _pollAttempts;
+}
 
-        CIFilter *filter = [CIFilter filterWithName:@"CIQRCodeGenerator"];
-        [filter setValue:data forKey:@"inputMessage"];
-        [filter setValue:@"M" forKey:@"inputCorrectionLevel"];
-        CIImage *ci = filter.outputImage;
-        if (!ci) return nil;
++ (instancetype)sharedSession {
+    static VSBulkSession *s = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [[VSBulkSession alloc] init]; });
+    return s;
+}
 
-        CGAffineTransform transform = CGAffineTransformMakeScale(10.0, 10.0);
-        CIImage *scaled = [ci imageByApplyingTransform:transform];
-        return [UIImage imageWithCIImage:scaled];
-    } @catch (NSException *e) {
-        VSLog(@"Lỗi tạo QR: %@", e.reason);
-        return nil;
+- (BOOL)active            { return _active; }
+- (BOOL)videoMode         { return _video; }
+- (NSUInteger)doneCount   { return _done; }
+- (NSUInteger)targetCount { return _targets.count; }
+
+- (unsigned long long)currentLayer {
+    if (_index >= _targets.count) return 0;
+    return (unsigned long long)_targets[_index].unsignedLongLongValue;
+}
+
+- (void)startWithTargets:(NSArray<NSNumber *> *)targets video:(BOOL)video {
+    if (targets.count == 0) {
+        VSToast(@"Không có lớp nào phù hợp");
+        return;
+    }
+    [self stop];
+    _targets = [targets copy];
+    _index = 0;
+    _done = 0;
+    _video = video;
+    _active = YES;
+    _awaiting = NO;
+    _pollAttempts = 0;
+    _generation++;
+    VSLog(@"bắt đầu nhập %@ cho %lu lớp", video ? @"video" : @"ảnh", (unsigned long)targets.count);
+    [self updateBanner];
+    [self openPickerForCurrent];
+}
+
+- (void)stop {
+    _active = NO;
+    _awaiting = NO;
+    _pollAttempts = 0;
+    _generation++;
+    _targets = nil;
+    _index = 0;
+    [[VSContext sharedContext] dismissPresentedPicker];
+    [[VSUI sharedUI] hideBanner];
+}
+
+- (void)stopWithMessage:(NSString *)message {
+    [self stop];
+    if (message.length) VSToast(message);
+}
+
+- (void)skip {
+    if (!_active || !_targets) return;
+    [self skipLayer:_generation];
+}
+
+- (void)finish {
+    NSUInteger done = _done;
+    [self stop];
+    VSToast([NSString stringWithFormat:@"Xong! Đã nhập %lu lớp", (unsigned long)done]);
+}
+
+- (void)updateBanner {
+    NSString *kind = _video ? @"Nhập video" : @"Nhập ảnh";
+    NSString *text = [NSString stringWithFormat:@"%@ • lớp %llu (%lu/%lu)",
+                      kind, [self currentLayer], (unsigned long)(_index + 1),
+                      (unsigned long)_targets.count];
+    __weak typeof(self) weakSelf = self;
+    [[VSUI sharedUI] showBanner:text
+                         onSkip:^{ [weakSelf skip]; }
+                         onStop:^{ [weakSelf stop]; }];
+}
+
+- (void)openPickerForCurrent {
+    if (!_active) return;
+    if (_index >= _targets.count) { [self finish]; return; }
+
+    UIViewController *vc = [[VSContext sharedContext] multiLayerViewController];
+    if (!vc) {
+        [self stopWithMessage:@"Hãy mở trình chỉnh lớp (Multi Layer) trước"];
+        return;
+    }
+
+    NSUInteger gen = _generation;
+    unsigned long long layer = [self currentLayer];
+    [[VSContext sharedContext] selectLayer:layer];
+    [self updateBanner];
+
+    _pollAttempts = 0;
+    _awaiting = YES;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!self->_active || gen != self->_generation) return;
+        [self invokePickerOn:vc generation:gen];
+        [self startPolling:gen];
+    });
+}
+
+- (void)invokePickerOn:(UIViewController *)vc generation:(NSUInteger)gen {
+    if (_video) {
+        if ([vc respondsToSelector:@selector(presentImportVideo)]) {
+            VSCallVoid(vc, @selector(presentImportVideo));
+        } else if ([vc respondsToSelector:@selector(importVideo)]) {
+            VSCallVoid(vc, @selector(importVideo));
+        } else {
+            [self stopWithMessage:@"Bản app này không hỗ trợ chọn video"];
+        }
+        return;
+    }
+
+    NSUserDefaults *def = [NSUserDefaults standardUserDefaults];
+    BOOL preferReplace = ([def objectForKey:@"VSToolbox.preferReplace"] != nil)
+                       ? [def boolForKey:@"VSToolbox.preferReplace"]
+                       : YES;
+
+    if (preferReplace && [vc respondsToSelector:@selector(pickNewContent)]) {
+        VSCallVoid(vc, @selector(pickNewContent));
+        return;
+    }
+
+    if ([vc respondsToSelector:@selector(showPhotoPicker)]) {
+        VSCallVoid(vc, @selector(showPhotoPicker));
+    } else {
+        [self stopWithMessage:@"Bản app này không hỗ trợ chọn ảnh"];
     }
 }
 
-// =====================================================================
-// MARK: - Cài hook an toàn
-// =====================================================================
+// Polling mỗi 0.5 giây: kiểm tra layer mục tiêu đã có nội dung chưa.
+// Nếu có → app đã gán xong media → chuyển lớp tiếp.
+// Nếu quá 15 giây (30 lần) vẫn không có → coi như người dùng hủy picker → bỏ qua.
+- (void)startPolling:(NSUInteger)gen {
+    if (!self->_active || !self->_awaiting) return;
 
-void VSToolboxInstallHooks(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        // Khởi động lắng nghe Clipboard
-        [VSCodeStore sharedStore];
-        VSLog(@"VSToolbox đã khởi tạo (chế độ an toàn, không can thiệp luồng nạp code).");
+    _pollAttempts++;
+    unsigned long long layer = [self currentLayer];
+    BOOL hasContent = [[VSContext sharedContext] layerHasContent:layer];
+
+    if (hasContent) {
+        [self layerReady:gen];
+        return;
+    }
+
+    if (_pollAttempts >= 30) { // 30 * 0.5s = 15s
+        VSLog(@"poll timeout cho lớp %llu", layer);
+        [self skipLayer:gen];
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self startPolling:gen];
     });
 }
+
+- (void)layerReady:(NSUInteger)gen {
+    if (!self->_active || gen != self->_generation) return;
+    _awaiting = NO;
+
+    _done++;
+    _index++;
+
+    if (_index >= _targets.count) {
+        [self finish];
+    } else {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (!self->_active || gen != self->_generation) return;
+            [self openPickerForCurrent];
+        });
+    }
+}
+
+- (void)skipLayer:(NSUInteger)gen {
+    if (!self->_active || gen != self->_generation) return;
+    _awaiting = NO;
+    _pollAttempts = 0;
+    _index++;
+
+    if (_index >= _targets.count) {
+        [self finish];
+    } else {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (!self->_active) return;
+            [self openPickerForCurrent];
+        });
+    }
+}
+
+@end
+
+// =====================================================================
+// MARK: - VSContext (extra methods needed by VSUI)
+// =====================================================================
+
+@implementation VSContext (VSToolboxExtra)
+
+- (NSArray<VSLayerInfo *> *)mediaCandidates {
+    return [self candidatesForVideo:NO];
+}
+
+- (void)applyImage:(UIImage *)image toLayers:(NSArray<NSNumber *> *)layers {
+    if (!image || !layers) return;
+    id engine = [self engine];
+    if (!engine) return;
+    SEL sel = @selector(setupImage:layerNum:layerType:clearMask:);
+    if (![engine respondsToSelector:sel]) return;
+    for (NSNumber *num in layers) {
+        unsigned long long layer = [num unsignedLongLongValue];
+        int layerType = [self layerTypeFor:layer];
+        ((void (*)(id, SEL, id, unsigned long long, int, BOOL))objc_msgSend)
+            (engine, sel, image, layer, layerType, NO);
+    }
+    [self refreshEditor];
+}
+
+@end
+
+// =====================================================================
+// MARK: - VSCodeStore (clipboard check)
+// =====================================================================
+
+@implementation VSCodeStore (VSToolboxClipboard)
+
+- (void)checkClipboard {
+    UIPasteboard *pb = [UIPasteboard generalPasteboard];
+    NSString *text = [pb string];
+    if (!text || text.length == 0) return;
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length < 6 || trimmed.length > 512) return;
+    // Tránh trùng với code đã có
+    for (VSCodeEntry *e in [self entries]) {
+        if ([e.code isEqualToString:trimmed]) return;
+    }
+    [self addCode:trimmed source:@"Clipboard"];
+}
+
+@end
+
+// =====================================================================
+// MARK: - QR image generator
+// =====================================================================
+
+UIImage *VSMakeQRImage(NSString *code) {
+    if (!code || code.length == 0) return nil;
+    CIFilter *filter = [CIFilter filterWithName:@"CIQRCodeGenerator"];
+    if (!filter) return nil;
+    [filter setValue:code.dataUsingEncoding(NSUTF8StringEncoding) forKey:@"inputMessage"];
+    [filter setValue:@"H" forKey:@"inputCorrectionLevel"];
+    CIImage *output = [filter outputImage];
+    if (!output) return nil;
+    CGRect extent = [output extent];
+    CGFloat scale = 200.0 / extent.size.width;
+    CIImage *scaled = [output imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
+    CIContext *ctx = [CIContext context];
+    CGImageRef cg = [ctx createCGImage:scaled fromRect:[scaled extent]];
+    UIImage *img = [UIImage imageWithCGImage:cg];
+    CGImageRelease(cg);
+    return img;
+}
+
+// =====================================================================
+// MARK: - Image picker (UIKit, không swizzle app)
+// =====================================================================
+
+@interface VSImagePicker () <UINavigationControllerDelegate, UIImagePickerControllerDelegate>
+@property (nonatomic, strong) UIImagePickerController *picker;
+@property (nonatomic, copy) void (^completion)(UIImage *image);
+@end
+
+@implementation VSImagePicker
+
++ (instancetype)sharedPicker {
+    static VSImagePicker *p = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ p = [[VSImagePicker alloc] init]; });
+    return p;
+}
+
+- (void)pickImageFrom:(UIViewController *)vc completion:(void (^)(UIImage *))completion {
+    self.completion = completion;
+    UIImagePickerController *picker = [[UIImagePickerController alloc] init];
+    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+    picker.mediaTypes = @[(NSString *)kUTTypeImage];
+    picker.delegate = self;
+    self.picker = picker;
+    [vc presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)imagePickerController:(UIImagePickerController *)picker
+didFinishPickingMediaWithInfo:(NSDictionary<NSString *,id> *)info {
+    UIImage *img = info[UIImagePickerControllerOriginalImage];
+    if (self.completion) self.completion(img);
+    self.completion = nil;
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    self.picker = nil;
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    if (self.completion) self.completion(nil);
+    self.completion = nil;
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    self.picker = nil;
+}
+
+@end

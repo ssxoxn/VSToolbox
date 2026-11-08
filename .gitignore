@@ -1,0 +1,17 @@
+# Build artifacts
+dist/
+*.dylib
+*.ipa
+*.app/
+
+# Work/analysis directories
+work/
+ipa_extracted/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db

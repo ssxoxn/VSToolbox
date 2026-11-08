@@ -121,6 +121,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
 - (UIView *)latestCodeCard:(VSCodeEntry *)entry;
 - (UIView *)clipboardRow;
 - (void)showQRForCode:(NSString *)code;
+- (UIView *)codeInputRow;
 @end
 
 @implementation VSPanelView {
@@ -448,6 +449,9 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
             [[VSCodeStore sharedStore] removeAll];
             VSToast(@"Đã xoá lịch sử code");
         }]];
+
+        [_stack addArrangedSubview:[self sectionLabel:@"Nhập code thủ công"]];
+        [_stack addArrangedSubview:[self codeInputRow]];
     }
 
     [_stack addArrangedSubview:[self sectionLabel:@"Tuỳ chọn"]];
@@ -819,6 +823,63 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
 - (void)stopTapped {
     void (^b)(void) = self.onStop;
     if (b) b();
+}
+
+// Ô nhập code thủ công (vì không còn tự động bắt code từ app nữa)
+- (UIView *)codeInputRow {
+    UIView *container = [[UIView alloc] init];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+    [container.heightAnchor constraintEqualToConstant:52].active = YES;
+
+    UITextField *tf = [[UITextField alloc] init];
+    tf.translatesAutoresizingMaskIntoConstraints = NO;
+    tf.placeholder = @"Nhập code …";
+    tf.borderStyle = UITextBorderStyleRoundedRect;
+    tf.font = [UIFont systemFontOfSize:15];
+    tf.textColor = VSText();
+    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    [container addSubview:tf];
+
+    UIButton *saveBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    saveBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [saveBtn setTitle:@"Lưu" forState:UIControlStateNormal];
+    saveBtn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    saveBtn.tintColor = VSPinkDeep();
+    [container addSubview:saveBtn];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [tf.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
+        tf.centerYAnchor.constraintEqualToAnchor:container.centerYAnchor,
+        [tf.trailingAnchor constraintEqualToAnchor:saveBtn.leadingAnchor constant:-8],
+
+        [saveBtn.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12],
+        [saveBtn.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
+        [saveBtn.widthAnchor constraintEqualToConstant:52],
+    ]];
+
+    __weak typeof(self) weakSelf = self;
+    __weak UITextField *weakTf = tf;
+    [saveBtn addAction:[UIAction actionWithHandler:^(UIAction * _Nonnull action) {
+        VSUI *strongSelf = weakSelf;
+        UITextField *tf = weakTf;
+        if (!strongSelf || !tf) return;
+        NSString *text = tf.text;
+        if (!text || text.length == 0) {
+            VSToast(@"Vui lòng nhập code");
+            return;
+        }
+        NSString *trimmed = [text stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length < 6) {
+            VSToast(@"Code quá ngắn");
+            return;
+        }
+        [[VSCodeStore sharedStore] addCode:trimmed source:@"Nhập thủ công"];
+        tf.text = @"";
+        VSToast(@"Đã lưu code");
+    }] forControlEvents:UIControlEventTouchUpInside];
+
+    return container;
 }
 
 @end
