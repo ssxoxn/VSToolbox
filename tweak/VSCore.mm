@@ -9,6 +9,7 @@
 #import <objc/message.h>
 #import <stdlib.h>
 #import <string.h>
+#import <MobileCoreServices/MobileCoreServices.h>
 
 // =====================================================================
 // MARK: - Màu
@@ -218,6 +219,20 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     dispatch_async(dispatch_get_main_queue(), ^{
         [[VSUI sharedUI] refreshPanel];
     });
+}
+
+- (void)checkClipboard {
+    UIPasteboard *pb = [UIPasteboard generalPasteboard];
+    NSString *text = [pb string];
+    if (!text || text.length == 0) return;
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length < 6 || trimmed.length > 512) return;
+    // Tránh trùng với code đã có
+    for (VSCodeEntry *e in [self entries]) {
+        if ([e.code isEqualToString:trimmed]) return;
+    }
+    [self addCode:trimmed source:@"Clipboard"];
 }
 
 @end
@@ -459,22 +474,30 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     return VSCall0(layer, @selector(origAssetInfo)) != nil;
 }
 
+- (NSArray<VSLayerInfo *> *)mediaCandidates {
+    return [self candidatesForVideo:NO];
+}
+
+- (void)applyImage:(UIImage *)image toLayers:(NSArray<NSNumber *> *)layers {
+    if (!image || !layers) return;
+    id engine = [self engine];
+    if (!engine) return;
+    SEL sel = @selector(setupImage:layerNum:layerType:clearMask:);
+    if (![engine respondsToSelector:sel]) return;
+    for (NSNumber *num in layers) {
+        unsigned long long layer = [num unsignedLongLongValue];
+        int layerType = [self layerTypeFor:layer];
+        ((void (*)(id, SEL, id, unsigned long long, int, BOOL))objc_msgSend)
+            (engine, sel, image, layer, layerType, NO);
+    }
+    [self refreshEditor];
+}
+
 @end
 
 // =====================================================================
 // MARK: - Phiên nhập hàng loạt (polling, không swizzle)
 // =====================================================================
-
-@interface VSBulkSession ()
-- (void)openPickerForCurrent;
-- (void)invokePickerOn:(UIViewController *)vc generation:(NSUInteger)gen;
-- (void)updateBanner;
-- (void)startPolling:(NSUInteger)gen;
-- (void)layerReady:(NSUInteger)gen;
-- (void)skipLayer:(NSUInteger)gen;
-- (void)finish;
-- (void)stopWithMessage:(NSString *)message;
-@end
 
 @implementation VSBulkSession {
     NSArray<NSNumber *> *_targets;
@@ -681,55 +704,6 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 @end
 
 // =====================================================================
-// MARK: - VSContext (extra methods needed by VSUI)
-// =====================================================================
-
-@implementation VSContext (VSToolboxExtra)
-
-- (NSArray<VSLayerInfo *> *)mediaCandidates {
-    return [self candidatesForVideo:NO];
-}
-
-- (void)applyImage:(UIImage *)image toLayers:(NSArray<NSNumber *> *)layers {
-    if (!image || !layers) return;
-    id engine = [self engine];
-    if (!engine) return;
-    SEL sel = @selector(setupImage:layerNum:layerType:clearMask:);
-    if (![engine respondsToSelector:sel]) return;
-    for (NSNumber *num in layers) {
-        unsigned long long layer = [num unsignedLongLongValue];
-        int layerType = [self layerTypeFor:layer];
-        ((void (*)(id, SEL, id, unsigned long long, int, BOOL))objc_msgSend)
-            (engine, sel, image, layer, layerType, NO);
-    }
-    [self refreshEditor];
-}
-
-@end
-
-// =====================================================================
-// MARK: - VSCodeStore (clipboard check)
-// =====================================================================
-
-@implementation VSCodeStore (VSToolboxClipboard)
-
-- (void)checkClipboard {
-    UIPasteboard *pb = [UIPasteboard generalPasteboard];
-    NSString *text = [pb string];
-    if (!text || text.length == 0) return;
-    NSString *trimmed = [text stringByTrimmingCharactersInSet:
-                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (trimmed.length < 6 || trimmed.length > 512) return;
-    // Tránh trùng với code đã có
-    for (VSCodeEntry *e in [self entries]) {
-        if ([e.code isEqualToString:trimmed]) return;
-    }
-    [self addCode:trimmed source:@"Clipboard"];
-}
-
-@end
-
-// =====================================================================
 // MARK: - QR image generator
 // =====================================================================
 
@@ -737,7 +711,7 @@ UIImage *VSMakeQRImage(NSString *code) {
     if (!code || code.length == 0) return nil;
     CIFilter *filter = [CIFilter filterWithName:@"CIQRCodeGenerator"];
     if (!filter) return nil;
-    [filter setValue:code.dataUsingEncoding(NSUTF8StringEncoding) forKey:@"inputMessage"];
+    [filter setValue:[code dataUsingEncoding:NSUTF8StringEncoding] forKey:@"inputMessage"];
     [filter setValue:@"H" forKey:@"inputCorrectionLevel"];
     CIImage *output = [filter outputImage];
     if (!output) return nil;
