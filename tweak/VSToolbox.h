@@ -64,8 +64,19 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 @property (nonatomic, assign) BOOL is3D;
 @property (nonatomic, assign) BOOL hasAsset;
 @property (nonatomic, assign) BOOL hasExtra;   // overlay / gif / zap / particle / drawing
+@property (nonatomic, assign) BOOL isPhoto;    // selector gốc -isPhotoLayer của Video Star
 - (BOOL)isMediaCandidate;
 - (NSString *)typeTitle;
+@end
+
+// ---- Nhập media qua picker GỐC của Video Star ----
+// Không giữ UIImage hay gọi setupImage: trực tiếp: app tự sở hữu luồng import.
+@interface VSBulkSession : NSObject
++ (instancetype)sharedSession;
+@property (nonatomic, readonly) BOOL active;
+- (void)startWithTargets:(NSArray<NSNumber *> *)targets video:(BOOL)video;
+- (void)stop;
+- (void)skip;
 @end
 
 // ---- Helper chọn ảnh từ thư viện ----
@@ -106,6 +117,7 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 - (void)setBannerText:(NSString *)text;
 - (void)hideBanner;
 - (void)showToastText:(NSString *)text;
+- (void)showImportSuccessWithCompleted:(NSUInteger)completed skipped:(NSUInteger)skipped;
 @end
 
 // ---- Tạo QR image từ code ----

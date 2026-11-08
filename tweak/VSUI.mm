@@ -518,7 +518,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
 
     __weak typeof(self) weakSelf = self;
     [_stack addArrangedSubview:[self row:@"Ảnh — Tự động nhập tất cả lớp"
-                               subtitle:@"Chọn 1 ảnh duy nhất → tự gán vào toàn bộ các lớp ảnh"
+                               subtitle:@"Dùng giao diện Ảnh chụp gốc; chỉ layer ảnh/video hợp lệ"
                                    icon:@"photo.on.rectangle.angled"
                                   color:nil
                                  action:^{ [weakSelf autoImportAll]; }]];
@@ -595,7 +595,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
                    : @"Sẽ dùng nút thêm ảnh mặc định của app");
     }]];
 
-    UILabel *footer = [self hintLabel:@"VSToolbox 1.0 • chỉ dùng cho mục đích cá nhân 🌸"];
+    UILabel *footer = [self hintLabel:@"Tele @cryxjw 🌸"];
     footer.textAlignment = NSTextAlignmentCenter;
     footer.font = [UIFont systemFontOfSize:11.5];
     footer.alpha = 0.7;
@@ -630,17 +630,8 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         [targets addObject:@(i.number)];
     }
 
-    UIViewController *top = [ctx topViewController];
-    if (!top) {
-        VSToast(@"Không tìm thấy màn hình hiển thị");
-        return;
-    }
-
     [[VSUI sharedUI] hidePanel];
-
-    [[VSImagePicker sharedPicker] pickImageFrom:top completion:^(UIImage *image) {
-        [[VSContext sharedContext] applyImage:image toLayers:targets];
-    }];
+    [[VSBulkSession sharedSession] startWithTargets:targets video:NO];
 }
 
 - (void)buildLayerPicker {
@@ -673,8 +664,9 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     }
 
     for (VSLayerInfo *info in cands) {
+        // App lưu index từ 0, nhưng người dùng luôn nhìn layer từ 1.
         NSString *title = [NSString stringWithFormat:@"Lớp %lu • %@ (loại %d)",
-                           (unsigned long)info.number, [info typeTitle], info.type];
+                           (unsigned long)(info.number + 1), [info typeTitle], info.type];
         NSNumber *num = @(info.number);
         BOOL on = [_picked containsObject:num];
         [_stack addArrangedSubview:[self switchRow:title isOn:on action:^(BOOL isOn) {
@@ -716,14 +708,8 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
         }];
 
     VSContext *ctx = [VSContext sharedContext];
-    UIViewController *top = [ctx topViewController];
-    if (!top) return;
-
     [[VSUI sharedUI] hidePanel];
-
-    [[VSImagePicker sharedPicker] pickImageFrom:top completion:^(UIImage *image) {
-        [[VSContext sharedContext] applyImage:image toLayers:sorted];
-    }];
+    [[VSBulkSession sharedSession] startWithTargets:sorted video:NO];
 }
 
 // ---------- Card nổi bật code gần nhất (hiển thị QR thay mã chữ) ----------
@@ -1325,6 +1311,31 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
             self->_toastView = nil;
         }];
     });
+}
+
+- (void)showImportSuccessWithCompleted:(NSUInteger)completed skipped:(NSUInteger)skipped {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self showImportSuccessWithCompleted:completed skipped:skipped];
+        });
+        return;
+    }
+    UIViewController *vc = [[VSContext sharedContext] topViewController];
+    if (!vc || vc.presentedViewController) {
+        VSToast([NSString stringWithFormat:@"Đã nhập thành công %lu lớp%@",
+                 (unsigned long)completed,
+                 skipped ? [NSString stringWithFormat:@" • bỏ qua %lu", (unsigned long)skipped] : @""]);
+        return;
+    }
+    NSString *message = skipped
+        ? [NSString stringWithFormat:@"Đã nhập thành công vào %lu lớp. Bỏ qua %lu lớp không hoàn tất.",
+           (unsigned long)completed, (unsigned long)skipped]
+        : [NSString stringWithFormat:@"Đã nhập ảnh thành công vào %lu lớp.", (unsigned long)completed];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Nhập ảnh hoàn tất ✓"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [vc presentViewController:alert animated:YES completion:nil];
 }
 
 @end

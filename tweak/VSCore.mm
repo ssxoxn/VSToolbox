@@ -577,14 +577,18 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
     if (self.isText) return NO;
     if (self.is3D) return NO;
     if (self.hasExtra) return NO;
-    return YES;
+    // isPhotoLayer là selector đã xác minh trong Video Star 15.0.3. Với video,
+    // app lưu origAssetInfo; mọi loại layer khác đã bị loại ở bốn guard trên.
+    // Nếu không chứng minh được một trong hai, mặc định KHÔNG đụng tới layer.
+    return self.isPhoto || self.hasAsset;
 }
 
 - (NSString *)typeTitle {
     if (self.isNull)   return @"Lớp trống";
     if (self.isText)   return @"Văn bản";
     if (self.is3D)     return @"3D";
-    if (self.hasExtra) return @"Hiệu ứng";
+    if (self.hasExtra) return @"Hiệu ứng (bỏ qua)";
+    if (self.isPhoto)  return @"Ảnh chụp";
     if (self.hasAsset) return @"Đã có nội dung";
     return @"Ảnh / Video (trống)";
 }
@@ -710,6 +714,7 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
         info.is3D     = VSCallBool(layer, @selector(is3DLayer));
         info.isText   = VSCall0(layer, @selector(textDictionary)) != nil;
         info.hasAsset = VSCall0(layer, @selector(origAssetInfo)) != nil;
+        info.isPhoto  = VSCallBool(layer, @selector(isPhotoLayer));
 
         BOOL extra = NO;
         extra = extra || VSCallBoolULL(engine, @selector(overlayObjectExistsOnLayerNum:), n);
@@ -909,18 +914,6 @@ UIImage *VSMakeQRImage(NSString *code) {
 // MARK: - Phiên nhập hàng loạt (polling, không swizzle)
 // =====================================================================
 
-@interface VSBulkSession : NSObject
-+ (instancetype)sharedSession;
-@property (nonatomic, readonly) BOOL active;
-@property (nonatomic, readonly) BOOL videoMode;
-@property (nonatomic, readonly) NSUInteger doneCount;
-@property (nonatomic, readonly) NSUInteger targetCount;
-@property (nonatomic, readonly) unsigned long long currentLayer;
-- (void)startWithTargets:(NSArray<NSNumber *> *)targets video:(BOOL)video;
-- (void)stop;
-- (void)skip;
-@end
-
 @implementation VSBulkSession {
     NSArray<NSNumber *> *_targets;
     NSUInteger _index;
@@ -1003,8 +996,9 @@ UIImage *VSMakeQRImage(NSString *code) {
 
 - (void)finish {
     NSUInteger done = _done;
+    NSUInteger skipped = _targets.count - _done;
     [self stop];
-    VSToast([NSString stringWithFormat:@"Xong! Đã nhập %lu lớp", (unsigned long)done]);
+    [[VSUI sharedUI] showImportSuccessWithCompleted:done skipped:skipped];
 }
 
 - (void)updateBanner {
@@ -1056,16 +1050,7 @@ UIImage *VSMakeQRImage(NSString *code) {
         return;
     }
 
-    NSUserDefaults *def = [NSUserDefaults standardUserDefaults];
-    BOOL preferReplace = ([def objectForKey:@"VSToolbox.preferReplace"] != nil)
-                       ? [def boolForKey:@"VSToolbox.preferReplace"]
-                       : YES;
-
-    if (preferReplace && [vc respondsToSelector:@selector(pickNewContent)]) {
-        VSCallVoid(vc, @selector(pickNewContent));
-        return;
-    }
-
+    // Bắt buộc dùng menu/picker ảnh của Video Star, không dùng picker riêng.
     if ([vc respondsToSelector:@selector(showPhotoPicker)]) {
         VSCallVoid(vc, @selector(showPhotoPicker));
     } else {
