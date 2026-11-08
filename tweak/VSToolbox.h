@@ -110,3 +110,11 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 
 // ---- Tạo QR image từ code ----
 UIImage *VSMakeQRImage(NSString *code);
+
+// ---- Chẩn đoán Pro (CHỈ ĐỌC — không hook) ----
+// Mỗi phần tử: {"member": "StoreModel.ownedProducts", "owner": "VSPlusUltra.dylib",
+//               "ok": BOOL, "missing": BOOL}
+NSArray<NSDictionary *> *VSProStatus(void);
+// Danh sách tên file dylib/ảnh KHÔNG thuộc hệ thống đang nạp trong tiến trình.
+// outTotal tương ứng toàn bộ _dyld_image_count().
+NSArray<NSString *> *VSLoadedDylibs(NSInteger *outTotal);

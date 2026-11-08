@@ -1,10 +1,9 @@
 //
 //  VSCore.mm
-//  Phần lõi: màu, helper, lịch sử code, quét lớp, phiên nhập hàng loạt (polling).
-//  Hook an toàn: chỉ hook importedData:code: + validCode: để bắt code tự động.
-//  KHÔNG hook QRCodeManager.saveCodeToPlist:desc: (giữ nguyên cho VSPlusUltra xử lý Pro).
-//  KHÔNG hook MultiLayerEngine.setupImage/setupVideoLayer (dùng polling).
-//  Không dùng method_setImplementation để can thiệp sâu vào state của app.
+//  Phần lõi: màu, helper, chẩn đoán Pro, lịch sử code, quét lớp,
+//  phiên nhập hàng loạt (polling).
+//  KHÔNG hook method nào của app (Plan C): bắt code bằng cách đọc
+//  QRCodes.plist → không xung đột VSPlusUltra / VSFix1-4 / CydiaSubstrate.
 //
 
 #import "VSToolbox.h"
@@ -12,6 +11,8 @@
 #import <objc/message.h>
 #import <stdlib.h>
 #import <string.h>
+#import <dlfcn.h>
+#import <mach-o/dyld.h>
 #import <MobileCoreServices/MobileCoreServices.h>
 #import <CoreImage/CoreImage.h>
 #import <CoreImage/CIFilterBuiltins.h>
@@ -138,6 +139,91 @@ int VSCallInt(id obj, SEL sel) {
 int VSCallIntULL(id obj, SEL sel, unsigned long long v) {
     if (!VSResp(obj, sel)) return 0;
     return ((int (*)(id, SEL, unsigned long long))objc_msgSend)(obj, sel, v);
+}
+
+// =====================================================================
+// MARK: - Chẩn đoán Pro (CHỈ ĐỌC — không hook, không sửa gì)
+// =====================================================================
+
+static NSString *VSDiagImageName(const char *fname) {
+    NSString *path = [NSString stringWithUTF8String:fname ?: ""];
+    NSString *base = [path lastPathComponent];
+    if (!base.length) base = path;
+    // "Video Star" = main executable → hook KHÔNG có; "...dylib" = hook đã cài
+    return base ?: path;
+}
+
+NSArray<NSDictionary *> *VSProStatus(void) {
+    static NSDictionary<NSString *, NSArray<NSString *> *> *members = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        members = @{
+            @"StoreModel" : @[@"ownedProducts",
+                              @"numberOfTheseProductsOwned:",
+                              @"boughtProduct:",
+                              @"subscriptionActive",
+                              @"autoRenewON",
+                              @"purchasedCount"],
+            @"QRCodeManager" : @[@"validQRCheck:",
+                                 @"saveCodeToPlist:desc:",
+                                 @"startQRImport",
+                                 @"setQRCodeUsed:",
+                                 @"selectedCode:withImageData:"],
+            @"RootViewController" : @[@"viewDidAppear:",
+                                      @"vsPLus:"],
+            @"UILabel" : @[@"setText:"],
+        };
+    });
+
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
+    for (NSString *clsName in members) {
+        Class cls = objc_getClass(clsName.UTF8String);
+        if (!cls) {
+            [rows addObject:@{@"member": [clsName stringByAppendingString:@" (class?!)"],
+                              @"owner": @"", @"ok": @NO, @"missing": @YES}];
+            continue;
+        }
+        for (NSString *selName in members[clsName]) {
+            SEL sel = NSSelectorFromString(selName);
+            IMP imp = class_getMethodImplementation(cls, sel);
+            NSDictionary *row;
+            if (!imp) {
+                row = @{@"member": [NSString stringWithFormat:@"%@.%@",
+                                    clsName, selName],
+                        @"owner": @"", @"ok": @NO, @"missing": @YES};
+            } else {
+                Dl_info info;
+                NSString *owner = @"";
+                if (dladdr((void *)imp, &info) && info.dli_fname) {
+                    owner = VSDiagImageName(info.dli_fname);
+                }
+                BOOL ok = [owner containsString:@"Ultra"] ||
+                          [owner containsString:@"dylib"];
+                row = @{@"member": [NSString stringWithFormat:@"%@.%@",
+                                    clsName, selName],
+                        @"owner": owner, @"ok": @(ok), @"missing": @NO};
+            }
+            [rows addObject:row];
+        }
+    }
+    return rows;
+}
+
+NSArray<NSString *> *VSLoadedDylibs(NSInteger *outTotal) {
+    uint32_t n = _dyld_image_count();
+    NSMutableArray<NSString *> *custom = [NSMutableArray array];
+    for (uint32_t i = 0; i < n; i++) {
+        const char *name = _dyld_get_image_name(i);
+        NSString *path = [NSString stringWithUTF8String:name ?: ""] ?: @"";
+        NSString *base = path.lastPathComponent;
+        BOOL system = [path hasPrefix:@"/System/Library/"] ||
+                      [path hasPrefix:@"/usr/lib/"] ||
+                      [path hasPrefix:@"/private/preboot/"];
+        if (system || base.length == 0) continue;
+        [custom addObject:base];
+    }
+    if (outTotal) *outTotal = (NSInteger)n;
+    return custom;
 }
 
 // =====================================================================

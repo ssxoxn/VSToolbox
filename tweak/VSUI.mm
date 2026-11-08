@@ -121,6 +121,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
 - (UIView *)latestCodeCard:(VSCodeEntry *)entry;
 - (UIView *)clipboardRow;
 - (void)showQRForCode:(NSString *)code;
+- (void)addProDiagSection;
 @end
 
 @implementation VSPanelView {
@@ -369,12 +370,114 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     return box;
 }
 
+// ---------- chẩn đoán Pro (đọc IMP + _dyld — không hook gì) ----------
+
+- (void)addProDiagSection {
+    [_stack addArrangedSubview:[self sectionLabel:@"Chẩn đoán Pro 🔍"]];
+
+    NSArray<NSDictionary *> *rows = VSProStatus();
+    BOOL allOK = YES;
+    NSString *bad = @"";
+    for (NSDictionary *row in rows) {
+        if ([row[@"missing"] boolValue] || ![row[@"ok"] boolValue]) {
+            if (bad.length) bad = [bad stringByAppendingString:@", "];
+            bad = [bad stringByAppendingString:row[@"member"]];
+            allOK = NO;
+        }
+    }
+
+    UIView *card = [[UIView alloc] init];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.backgroundColor = VSPinkSoft();
+    card.layer.cornerRadius = 14;
+    card.layer.borderWidth = 1.5;
+    card.layer.borderColor = [VSPink() colorWithAlphaComponent:0.4].CGColor;
+
+    UIStackView *v = [[UIStackView alloc] init];
+    v.translatesAutoresizingMaskIntoConstraints = NO;
+    v.axis = UILayoutConstraintAxisVertical;
+    v.spacing = 2;
+    [card addSubview:v];
+
+    // Tổng kết
+    UILabel *head = [[UILabel alloc] init];
+    head.translatesAutoresizingMaskIntoConstraints = NO;
+    head.numberOfLines = 0;
+    if (allOK) {
+        head.text = @"✅ Pro OK — hook thuộc VSPlusUltra.dylib";
+        head.textColor = [UIColor systemGreenColor];
+    } else {
+        head.text = [@"⚠ Pro hỏng — hook KHÔNG được cài bởi VSPlusUltra:\n"
+                      stringByAppendingString:bad];
+        head.textColor = VSPinkDeep();
+    }
+    head.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    [v addArrangedSubview:head];
+
+    // Từng hook
+    for (NSDictionary *row in rows) {
+        BOOL missing = [row[@"missing"] boolValue];
+        BOOL ok = [row[@"ok"] boolValue];
+        NSString *mark = missing ? @"?" : (ok ? @"✓" : @"✗");
+        NSString *detail = missing ? @"(thiếu IMP)" : row[@"owner"];
+        UILabel *line = [[UILabel alloc] init];
+        line.translatesAutoresizingMaskIntoConstraints = NO;
+        line.text = [NSString stringWithFormat:@"%@ %@ — %@", mark,
+                     row[@"member"], detail];
+        line.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+        line.textColor = missing || !ok ? VSPinkDeep() : [VSText() colorWithAlphaComponent:0.8];
+        line.numberOfLines = 0;
+        [v addArrangedSubview:line];
+    }
+
+    // Danh sách dylib đang nạp (bấm mở chi tiết)
+    NSInteger totalImages = 0;
+    NSArray<NSString *> *dylibs = VSLoadedDylibs(&totalImages);
+    UIButton *dylibRow = [UIButton buttonWithType:UIButtonTypeSystem];
+    dylibRow.translatesAutoresizingMaskIntoConstraints = NO;
+    UIButtonConfiguration *cfg = [UIButtonConfiguration plainButtonConfiguration];
+    cfg.title = [NSString stringWithFormat:@"%lu dylib app đang nạp (bấm xem danh sách)",
+                 (unsigned long)dylibs.count];
+    cfg.image = [UIImage systemImageNamed:@"shippingbox.fill"];
+    cfg.imagePadding = 6;
+    cfg.baseForegroundColor = VSPinkDeep();
+    cfg.contentInsets = NSDirectionalEdgeInsetsMake(8, 0, 8, 0);
+    dylibRow.configuration = cfg;
+    [dylibRow addAction:[UIAction actionWithHandler:^(UIAction *a) {
+        NSString *msg = dylibs.count
+            ? [dylibs componentsJoinedByString:@"\n"]
+            : @"(chỉ có framework hệ thống)";
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:
+                [NSString stringWithFormat:@"%lu / %ld ảnh được nạp",
+                 (unsigned long)dylibs.count, (long)totalImages]
+            message:msg
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction
+            actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+        UIViewController *vc = [[VSContext sharedContext] topViewController];
+        if (vc) [vc presentViewController:alert animated:YES completion:nil];
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [v addArrangedSubview:dylibRow];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [v.topAnchor constraintEqualToAnchor:card.topAnchor constant:10],
+        [v.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [v.trailingAnchor constraintLessThanOrEqualToAnchor:card.trailingAnchor constant:-14],
+        [v.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-10],
+    ]];
+
+    [_stack addArrangedSubview:card];
+}
+
 // ---------- menu chính ----------
 
 - (void)buildMenu {
     VSContext *ctx = [VSContext sharedContext];
     BOOL inEditor = [ctx isInMultiLayerEditor];
     NSArray<VSLayerInfo *> *cands = inEditor ? [ctx candidatesForVideo:NO] : @[];
+
+    [self addProDiagSection];
 
     [_stack addArrangedSubview:[self hintLabel:
         inEditor
