@@ -747,7 +747,7 @@ static IMP VSHookMethod(Class cls, SEL sel, IMP newImp) {
     NSString *key = VSKeyFor(cls, sel);
     if (!gVSOrigIMPs) gVSOrigIMPs = [NSMutableDictionary dictionary];
     if (!gVSOrigIMPs[key]) {
-        gVSOrigIMPs[key] = [NSValue valueWithPointer:method_getImplementation(m)];
+        gVSOrigIMPs[key] = [NSValue valueWithPointer:(const void *)method_getImplementation(m)];
     }
     method_setImplementation(m, newImp);
     return (IMP)gVSOrigIMPs[key].pointerValue;
