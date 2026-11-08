@@ -707,7 +707,6 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
             return [(NSNumber *)a compare:(NSNumber *)b];
         }];
 
-    VSContext *ctx = [VSContext sharedContext];
     [[VSUI sharedUI] hidePanel];
     [[VSBulkSession sharedSession] startWithTargets:sorted video:NO];
 }
