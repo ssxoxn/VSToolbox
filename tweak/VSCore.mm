@@ -151,6 +151,10 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 
 @interface VSCodeStore ()
 - (NSArray<NSDictionary *> *)rawEntries;
+- (void)addCodeQuietly:(NSString *)code source:(NSString *)source;
+- (void)importFromAppPlists;
+- (void)collectCodesFrom:(id)obj into:(NSMutableArray<NSString *> *)out depth:(int)depth;
+- (void)collectCodesFromString:(NSString *)s into:(NSMutableArray<NSString *> *)out;
 @end
 
 @implementation VSCodeStore
@@ -237,6 +241,111 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
         if ([e.code isEqualToString:trimmed]) return;
     }
     [self addCode:trimmed source:@"Clipboard"];
+}
+
+// ---------- Đọc code trực tiếp từ QRCodes.plist của app ----------
+
+// App lưu code qua QRCodeManager.saveCodeToPlist:desc: vào QRCodes.plist.
+// Đọc file (thụ động) thay vì hook method → không xung đột với VSPlusUltra/VSFix.
+- (void)importFromAppPlists {
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    NSString *home = NSHomeDirectory();
+    [paths addObject:[home stringByAppendingPathComponent:@"Library/QRCodes.plist"]];
+    [paths addObject:[home stringByAppendingPathComponent:@"Library/Caches/QRCodes.plist"]];
+    [paths addObject:[home stringByAppendingPathComponent:@"Documents/QRCodes.plist"]];
+    [paths addObject:[home stringByAppendingPathComponent:@"QRCodes.plist"]];
+
+    NSMutableArray<NSString *> *found = [NSMutableArray array];
+    for (NSString *path in paths) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:path]) continue;
+        NSData *data = [NSData dataWithContentsOfFile:path];
+        if (!data) continue;
+        id plist = [NSPropertyListSerialization propertyListWithData:data
+                                                             options:0
+                                                              format:nil
+                                                               error:nil];
+        if (plist) {
+            [self collectCodesFrom:plist into:found depth:0];
+            VSLog(@"QRCodes.plist: %@ → %lu code", path, (unsigned long)found.count);
+        }
+    }
+
+    NSUInteger added = 0;
+    for (NSString *code in found) {
+        BOOL exists = NO;
+        for (VSCodeEntry *e in [self entries]) {
+            if ([e.code isEqualToString:code]) { exists = YES; break; }
+        }
+        if (!exists) {
+            [self addCodeQuietly:code source:@"QRCodes.plist"];
+            added++;
+        }
+    }
+    if (added > 0) {
+        VSLog(@"lấy thêm %lu code từ plist (%@)", (unsigned long)added, found.firstObject);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[VSUI sharedUI] refreshPanel];
+        });
+    }
+}
+
+// Tương tự addCode nhưng không log/toast và không refresh — dùng khi quét nhiều code.
+- (void)addCodeQuietly:(NSString *)code source:(NSString *)source {
+    if (![code isKindOfClass:[NSString class]]) return;
+    NSString *trimmed = [code stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length < 6 || trimmed.length > 512) return;
+
+    NSMutableArray *list = [NSMutableArray array];
+    [list addObject:@{
+        @"code": trimmed,
+        @"source": ([source isKindOfClass:[NSString class]] ? source : @""),
+        @"date": @([[NSDate date] timeIntervalSince1970]),
+    }];
+    for (NSDictionary *old in [self rawEntries]) {
+        NSString *oldCode = old[@"code"];
+        if (![oldCode isKindOfClass:[NSString class]]) continue;
+        if ([oldCode isEqualToString:trimmed]) continue;
+        [list addObject:old];
+        if (list.count >= VS_CODE_HISTORY) break;
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:list forKey:kVSCodesKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (void)collectCodesFromString:(NSString *)s into:(NSMutableArray<NSString *> *)out {
+    if (![s isKindOfClass:[NSString class]]) return;
+    NSString *t = [s stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (t.length < 6 || t.length > 512) return;
+    if (![out containsObject:t]) [out addObject:t];
+}
+
+- (void)collectCodesFrom:(id)obj into:(NSMutableArray<NSString *> *)out depth:(int)depth {
+    if (depth > 4 || !obj) return;
+    if ([obj isKindOfClass:[NSString class]]) {
+        [self collectCodesFromString:obj into:out];
+        return;
+    }
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *d = (NSDictionary *)obj;
+        for (id key in d) {
+            id v = d[key];
+            if ([v isKindOfClass:[NSString class]]) {
+                // bỏ qua field mô tả (desc) — chỉ lấy code thật
+                if ([key isKindOfClass:[NSString class]] &&
+                    ([key isEqualToString:@"desc"] ||
+                     [key caseInsensitiveCompare:@"description"] == NSOrderedSame)) continue;
+                [self collectCodesFromString:v into:out];
+            } else {
+                [self collectCodesFrom:v into:out depth:depth + 1];
+            }
+        }
+        return;
+    }
+    if ([obj isKindOfClass:[NSArray class]]) {
+        for (id v in (NSArray *)obj) [self collectCodesFrom:v into:out depth:depth + 1];
+    }
 }
 
 @end
@@ -812,124 +921,3 @@ UIImage *VSMakeQRImage(NSString *code) {
 
 @end
 
-// =====================================================================
-// MARK: - Hook infra (method_setImplementation, chỉ dùng để bắt code)
-// =====================================================================
-
-static NSMutableDictionary<NSString *, NSValue *> *gVSOrigIMPs = nil;
-
-static NSString *VSKeyFor(Class cls, SEL sel) {
-    return [NSString stringWithFormat:@"%s|%s", class_getName(cls), sel_getName(sel)];
-}
-
-static IMP VSHookMethod(Class cls, SEL sel, IMP newImp) {
-    if (!cls || !sel) return NULL;
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return NULL;
-
-    NSString *key = VSKeyFor(cls, sel);
-    if (!gVSOrigIMPs) gVSOrigIMPs = [NSMutableDictionary dictionary];
-    if (!gVSOrigIMPs[key]) {
-        gVSOrigIMPs[key] = [NSValue valueWithPointer:(const void *)method_getImplementation(m)];
-    }
-    method_setImplementation(m, newImp);
-    return (IMP)gVSOrigIMPs[key].pointerValue;
-}
-
-static IMP VSOriginalFor(id self, SEL sel) {
-    if (!gVSOrigIMPs) return NULL;
-    Class cls = object_getClass(self);
-    for (; cls; cls = class_getSuperclass(cls)) {
-        NSValue *v = gVSOrigIMPs[VSKeyFor(cls, sel)];
-        if (v) return (IMP)v.pointerValue;
-    }
-    return NULL;
-}
-
-static BOOL VSIsMainExecutableClass(Class cls) {
-    const char *image = class_getImageName(cls);
-    if (!image) return NO;
-    NSString *exe = [[NSBundle mainBundle] executablePath];
-    if (!exe) return YES;
-    return strcmp(image, [exe fileSystemRepresentation]) == 0;
-}
-
-// ---- Hook importedData:code: ----
-
-static void VSHook_importedData_code(id self, SEL _cmd, id data, id code) {
-    @try {
-        if ([code isKindOfClass:[NSString class]]) {
-            [[VSCodeStore sharedStore] addCode:(NSString *)code
-                                        source:NSStringFromClass([self class])];
-        }
-    } @catch (NSException *e) {
-        VSLog(@"importedData hook: %@", e.reason);
-    }
-    IMP imp = VSOriginalFor(self, _cmd);
-    if (imp) ((void (*)(id, SEL, id, id))imp)(self, _cmd, data, code);
-}
-
-// ---- Hook validCode: ----
-
-static BOOL VSHook_validCode(id self, SEL _cmd, id code) {
-    IMP imp = VSOriginalFor(self, _cmd);
-    BOOL ok = NO;
-    if (imp) ok = ((BOOL (*)(id, SEL, id))imp)(self, _cmd, code);
-
-    if (ok && [code isKindOfClass:[NSString class]]) {
-        @try {
-            [[VSCodeStore sharedStore] addCode:(NSString *)code
-                                        source:NSStringFromClass([self class])];
-        } @catch (NSException *e) {
-            VSLog(@"validCode hook: %@", e.reason);
-        }
-    }
-    return ok;
-}
-
-static void VSInstallHooksForSelector(SEL sel, IMP newImp) {
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return;
-
-    Class *classes = (Class *)malloc(sizeof(Class) * (size_t)count);
-    if (!classes) return;
-    count = objc_getClassList(classes, count);
-
-    int hooked = 0;
-    for (int i = 0; i < count; i++) {
-        Class cls = classes[i];
-        if (!VSIsMainExecutableClass(cls)) continue;
-
-        BOOL implements = NO;
-        unsigned int mcount = 0;
-        Method *methods = class_copyMethodList(cls, &mcount);
-        for (unsigned int j = 0; j < mcount; j++) {
-            if (sel_isEqual(method_getName(methods[j]), sel)) { implements = YES; break; }
-        }
-        if (methods) free(methods);
-
-        if (implements) {
-            VSHookMethod(cls, sel, newImp);
-            hooked++;
-        }
-    }
-    free(classes);
-    VSLog(@"hook %s ở %d class", sel_getName(sel), hooked);
-}
-
-static void VSInstallCodeHooks(void) {
-    VSInstallHooksForSelector(@selector(importedData:code:), (IMP)VSHook_importedData_code);
-    VSInstallHooksForSelector(@selector(validCode:), (IMP)VSHook_validCode);
-}
-
-// =====================================================================
-// MARK: - Cài hook (chỉ hook code, không hook method quan trọng của app)
-// =====================================================================
-
-void VSToolboxInstallHooks(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        VSInstallCodeHooks();
-        VSLog(@"đã cài hook code (importedData:code: + validCode:)");
-    });
-}

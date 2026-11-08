@@ -52,6 +52,7 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 - (void)addCode:(NSString *)code source:(NSString *)source;
 - (void)removeAll;
 - (void)checkClipboard;
+- (void)importFromAppPlists;
 @end
 
 // ---- Layer Info ----
@@ -109,6 +110,3 @@ int VSCallIntULL(id obj, SEL sel, unsigned long long v);
 
 // ---- Tạo QR image từ code ----
 UIImage *VSMakeQRImage(NSString *code);
-
-// ---- Cài hook bắt code an toàn (importedData:code: + validCode:) ----
-void VSToolboxInstallHooks(void);

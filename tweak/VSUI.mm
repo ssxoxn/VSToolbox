@@ -121,7 +121,6 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
 - (UIView *)latestCodeCard:(VSCodeEntry *)entry;
 - (UIView *)clipboardRow;
 - (void)showQRForCode:(NSString *)code;
-- (UIView *)codeInputRow;
 @end
 
 @implementation VSPanelView {
@@ -400,9 +399,12 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     [_stack addArrangedSubview:[self sectionLabel:@"Code gần đây"]];
 
     NSArray<VSCodeEntry *> *codes = [[VSCodeStore sharedStore] entries];
+    // Không còn hook: tự quét QRCodes.plist của app mỗi lần mở panel code section
+    [[VSCodeStore sharedStore] importFromAppPlists];
+    codes = [[VSCodeStore sharedStore] entries];
     if (codes.count == 0) {
         [_stack addArrangedSubview:[self hintLabel:
-            @"Chưa có code nào. Nhập code trong app rồi mở lại panel — code sẽ hiện ở đây."]];
+            @"Chưa có code nào. Nhập code trong app xong mở lại panel — toolbox tự đọc từ bộ nhớ app."]];
     } else {
         // Card nổi bật cho code gần nhất
         VSCodeEntry *latest = codes[0];
@@ -425,18 +427,12 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
             for (NSUInteger i = 1; i < codes.count; i++) {
                 VSCodeEntry *e = codes[i];
                 NSString *code = e.code;
-                UIButton *codeRow = [self row:code
-                                     subtitle:[NSString stringWithFormat:@"Nhấn để copy • %@",
-                                               VSRelativeTimeLabel(e.date)]
-                                         icon:@"key.fill"
+                UIButton *codeRow = [self row:[NSString stringWithFormat:@"Code %lu • %@",
+                                               (unsigned long)(i + 1), VSRelativeTimeLabel(e.date)]
+                                     subtitle:@"Nhấn để xem QR"
+                                         icon:@"qrcode"
                                         color:VSText()
-                                       action:^{
-                    [UIPasteboard generalPasteboard].string = code;
-                    VSToast(@"Đã copy code");
-                }];
-                UIButtonConfiguration *cfg = codeRow.configuration;
-                cfg.titleLineBreakMode = NSLineBreakByTruncatingMiddle;
-                codeRow.configuration = cfg;
+                                       action:^{ [weakSelf showQRForCode:code]; }];
                 [_stack addArrangedSubview:codeRow];
             }
         }
@@ -449,9 +445,6 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
             [[VSCodeStore sharedStore] removeAll];
             VSToast(@"Đã xoá lịch sử code");
         }]];
-
-        [_stack addArrangedSubview:[self sectionLabel:@"Nhập code thủ công"]];
-        [_stack addArrangedSubview:[self codeInputRow]];
     }
 
     [_stack addArrangedSubview:[self sectionLabel:@"Tuỳ chọn"]];
@@ -600,7 +593,7 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     }];
 }
 
-// ---------- Card nổi bật code gần nhất ----------
+// ---------- Card nổi bật code gần nhất (hiển thị QR thay mã chữ) ----------
 
 - (UIView *)latestCodeCard:(VSCodeEntry *)entry {
     UIView *card = [[UIView alloc] init];
@@ -617,55 +610,58 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     badgeLabel.textColor = VSPinkDeep();
     [card addSubview:badgeLabel];
 
-    UILabel *codeLabel = [[UILabel alloc] init];
-    codeLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    codeLabel.text = entry.code;
-    codeLabel.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightMedium];
-    codeLabel.textColor = VSText();
-    codeLabel.numberOfLines = 0;
-    codeLabel.lineBreakMode = NSLineBreakByCharWrapping;
-    [card addSubview:codeLabel];
+    UILabel *infoLabel = [[UILabel alloc] init];
+    infoLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    infoLabel.text = [NSString stringWithFormat:@">%@",
+                      VSRelativeTimeLabel(entry.date)];
+    infoLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
+    infoLabel.textColor = [VSText() colorWithAlphaComponent:0.5];
+    [card addSubview:infoLabel];
 
-    UILabel *timeLabel = [[UILabel alloc] init];
-    timeLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    timeLabel.text = VSRelativeTimeLabel(entry.date);
-    timeLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
-    timeLabel.textColor = [VSText() colorWithAlphaComponent:0.5];
-    [card addSubview:timeLabel];
+    // Hình QR của code — hiển thị trực tiếp trong panel
+    UIImageView *qrView = [[UIImageView alloc] init];
+    qrView.translatesAutoresizingMaskIntoConstraints = NO;
+    qrView.image = VSMakeQRImage(entry.code);
+    qrView.contentMode = UIViewContentModeScaleAspectFit;
+    qrView.layer.cornerRadius = 8;
+    qrView.layer.masksToBounds = YES;
+    [card addSubview:qrView];
 
-    // Nút Copy
-    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    UIButtonConfiguration *cfg = [UIButtonConfiguration filledButtonConfiguration];
-    cfg.title = @"Copy";
-    cfg.image = [UIImage systemImageNamed:@"doc.on.doc"];
-    cfg.imagePadding = 6;
-    cfg.baseBackgroundColor = VSPink();
-    cfg.baseForegroundColor = [UIColor whiteColor];
-    cfg.cornerStyle = UIButtonConfigurationCornerStyleMedium;
-    cfg.contentInsets = NSDirectionalEdgeInsetsMake(8, 12, 8, 12);
-    copyBtn.configuration = cfg;
     NSString *code = entry.code;
-    [copyBtn addAction:[UIAction actionWithHandler:^(UIAction *a) {
-        [UIPasteboard generalPasteboard].string = code;
-        VSToast(@"Đã copy code ✓");
+
+    UIButton *saveBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    saveBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    UIButtonConfiguration *saveCfg = [UIButtonConfiguration filledButtonConfiguration];
+    saveCfg.title = @"Lưu QR";
+    saveCfg.image = [UIImage systemImageNamed:@"square.and.arrow.down.fill"];
+    saveCfg.imagePadding = 5;
+    saveCfg.baseBackgroundColor = VSPink();
+    saveCfg.baseForegroundColor = [UIColor whiteColor];
+    saveCfg.cornerStyle = UIButtonConfigurationCornerStyleMedium;
+    saveCfg.contentInsets = NSDirectionalEdgeInsetsMake(7, 11, 7, 11);
+    saveBtn.configuration = saveCfg;
+    [saveBtn addAction:[UIAction actionWithHandler:^(UIAction *a) {
+        UIImage *img = VSMakeQRImage(code);
+        if (!img) { VSToast(@"Không tạo được QR"); return; }
+        UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil);
+        VSToast(@"Đã lưu QR vào Photos ✓");
     }] forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:copyBtn];
+    [card addSubview:saveBtn];
 
     [NSLayoutConstraint activateConstraints:@[
         [badgeLabel.topAnchor constraintEqualToAnchor:card.topAnchor constant:12],
         [badgeLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [infoLabel.centerYAnchor constraintEqualToAnchor:badgeLabel.centerYAnchor],
+        [infoLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
 
-        [codeLabel.topAnchor constraintEqualToAnchor:badgeLabel.bottomAnchor constant:6],
-        [codeLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-        [codeLabel.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+        [qrView.topAnchor constraintEqualToAnchor:badgeLabel.bottomAnchor constant:10],
+        [qrView.centerXAnchor constraintEqualToAnchor:card.centerXAnchor],
+        [qrView.widthAnchor constraintEqualToConstant:170],
+        [qrView.heightAnchor constraintEqualToConstant:170],
 
-        [timeLabel.topAnchor constraintEqualToAnchor:codeLabel.bottomAnchor constant:4],
-        [timeLabel.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-
-        [copyBtn.topAnchor constraintEqualToAnchor:timeLabel.bottomAnchor constant:10],
-        [copyBtn.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
-        [copyBtn.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-12],
+        [saveBtn.topAnchor constraintEqualToAnchor:qrView.bottomAnchor constant:10],
+        [saveBtn.centerXAnchor constraintEqualToAnchor:card.centerXAnchor],
+        [saveBtn.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-12],
     ]];
 
     return card;
@@ -734,62 +730,6 @@ static NSString *VSRelativeTimeLabel(NSDate *date) {
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
 
-// Ô nhập code thủ công (vì không còn tự động bắt code từ app nữa)
-- (UIView *)codeInputRow {
-    UIView *container = [[UIView alloc] init];
-    container.translatesAutoresizingMaskIntoConstraints = NO;
-    [container.heightAnchor constraintEqualToConstant:52].active = YES;
-
-    UITextField *tf = [[UITextField alloc] init];
-    tf.translatesAutoresizingMaskIntoConstraints = NO;
-    tf.placeholder = @"Nhập code …";
-    tf.borderStyle = UITextBorderStyleRoundedRect;
-    tf.font = [UIFont systemFontOfSize:15];
-    tf.textColor = VSText();
-    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-    [container addSubview:tf];
-
-    UIButton *saveBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    saveBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [saveBtn setTitle:@"Lưu" forState:UIControlStateNormal];
-    saveBtn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    saveBtn.tintColor = VSPinkDeep();
-    [container addSubview:saveBtn];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [tf.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
-        [tf.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
-        [tf.trailingAnchor constraintEqualToAnchor:saveBtn.leadingAnchor constant:-8],
-
-        [saveBtn.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12],
-        [saveBtn.centerYAnchor constraintEqualToAnchor:container.centerYAnchor],
-        [saveBtn.widthAnchor constraintEqualToConstant:52],
-    ]];
-
-    __weak typeof(self) weakSelf = self;
-    __weak UITextField *weakTf = tf;
-    [saveBtn addAction:[UIAction actionWithHandler:^(UIAction * _Nonnull action) {
-        VSPanelView *strongSelf = weakSelf;
-        UITextField *tf = weakTf;
-        if (!strongSelf || !tf) return;
-        NSString *text = tf.text;
-        if (!text || text.length == 0) {
-            VSToast(@"Vui lòng nhập code");
-            return;
-        }
-        NSString *trimmed = [text stringByTrimmingCharactersInSet:
-                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmed.length < 6) {
-            VSToast(@"Code quá ngắn");
-            return;
-        }
-        [[VSCodeStore sharedStore] addCode:trimmed source:@"Nhập thủ công"];
-        tf.text = @"";
-        VSToast(@"Đã lưu code");
-    }] forControlEvents:UIControlEventTouchUpInside];
-
-    return container;
-}
 
 @end
 
