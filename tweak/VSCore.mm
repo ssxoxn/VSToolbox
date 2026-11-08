@@ -510,7 +510,7 @@ UIImage *VSMakeQRImage(NSString *code) {
     if (!data) return nil;
 
     CIFilter<CIQRCodeGenerator> *filter =
-        [CIFilter filterWithName:@"CIQRCodeGenerator"];
+        (CIFilter<CIQRCodeGenerator> *)[CIFilter filterWithName:@"CIQRCodeGenerator"];
     if (!filter) return nil;
     [filter setValue:data forKey:@"inputMessage"];
     [filter setValue:@"H" forKey:@"inputCorrectionLevel"];
