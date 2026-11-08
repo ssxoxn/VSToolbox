@@ -499,6 +499,20 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 // MARK: - Phiên nhập hàng loạt (polling, không swizzle)
 // =====================================================================
 
+@interface VSBulkSession : NSObject
++ (instancetype)sharedSession;
+@property (nonatomic, readonly) BOOL active;
+@property (nonatomic, readonly) BOOL videoMode;
+@property (nonatomic, readonly) NSUInteger doneCount;
+@property (nonatomic, readonly) NSUInteger targetCount;
+@property (nonatomic, readonly) unsigned long long currentLayer;
+- (void)startWithTargets:(NSArray<NSNumber *> *)targets video:(BOOL)video;
+- (void)stop;
+- (void)skip;
+- (void)noteImage:(id)image layer:(unsigned long long)layerNum type:(int)layerType;
+- (void)noteVideo:(id)asset layer:(unsigned long long)layerNum volume:(float)volume;
+@end
+
 @implementation VSBulkSession {
     NSArray<NSNumber *> *_targets;
     NSUInteger _index;
@@ -747,7 +761,7 @@ UIImage *VSMakeQRImage(NSString *code) {
     self.completion = completion;
     UIImagePickerController *picker = [[UIImagePickerController alloc] init];
     picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-    picker.mediaTypes = @[(NSString *)kUTTypeImage];
+    picker.mediaTypes = @[@"public.image"];
     picker.delegate = self;
     self.picker = picker;
     [vc presentViewController:picker animated:YES completion:nil];
