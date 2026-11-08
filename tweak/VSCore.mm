@@ -509,8 +509,6 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 - (void)startWithTargets:(NSArray<NSNumber *> *)targets video:(BOOL)video;
 - (void)stop;
 - (void)skip;
-- (void)noteImage:(id)image layer:(unsigned long long)layerNum type:(int)layerType;
-- (void)noteVideo:(id)asset layer:(unsigned long long)layerNum volume:(float)volume;
 @end
 
 @implementation VSBulkSession {
