@@ -13,6 +13,8 @@
 #import <stdlib.h>
 #import <string.h>
 #import <MobileCoreServices/MobileCoreServices.h>
+#import <CoreImage/CoreImage.h>
+#import <CoreImage/CIFilterBuiltins.h>
 
 // =====================================================================
 // MARK: - Màu
@@ -496,6 +498,39 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 }
 
 @end
+
+// =====================================================================
+// MARK: - Tạo QR image từ code (CIQRCodeGenerator, không dùng method app)
+// =====================================================================
+
+UIImage *VSMakeQRImage(NSString *code) {
+    if (![code isKindOfClass:[NSString class]] || code.length == 0) return nil;
+
+    NSData *data = [code dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return nil;
+
+    CIFilter<CIQRCodeGenerator> *filter =
+        [CIFilter filterWithName:@"CIQRCodeGenerator"];
+    if (!filter) return nil;
+    [filter setValue:data forKey:@"inputMessage"];
+    [filter setValue:@"H" forKey:@"inputCorrectionLevel"];
+
+    CIImage *outImage = filter.outputImage;
+    if (!outImage) return nil;
+
+    static CIContext *ctx = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        ctx = [CIContext contextWithOptions:nil];
+    });
+
+    CGImageRef cg = [ctx createCGImage:outImage fromRect:outImage.extent];
+    if (!cg) return nil;
+
+    UIImage *ui = [UIImage imageWithCGImage:cg];
+    CGImageRelease(cg);
+    return ui;
+}
 
 // =====================================================================
 // MARK: - Phiên nhập hàng loạt (polling, không swizzle)
