@@ -500,6 +500,54 @@ static NSString *const kVSCodesKey = @"VSToolbox.codes.v1";
 @end
 
 // =====================================================================
+// MARK: - VSImagePicker (chọn ảnh từ thư viện bằng picker hệ thống)
+// =====================================================================
+
+@implementation VSImagePicker {
+    UIViewController *_presentingVC;
+    void (^_completion)(UIImage *);
+}
+
++ (instancetype)sharedPicker {
+    static VSImagePicker *picker = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ picker = [[VSImagePicker alloc] init]; });
+    return picker;
+}
+
+- (void)pickImageFrom:(UIViewController *)vc completion:(void (^)(UIImage *image))completion {
+    if (!vc) return;
+    _presentingVC = vc;
+    _completion = [completion copy];
+
+    UIImagePickerController *p = [[UIImagePickerController alloc] init];
+    p.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+    p.mediaTypes = @[ @"public.image" ];
+    p.allowsEditing = NO;
+    p.delegate = self;
+    [vc presentViewController:p animated:YES completion:nil];
+}
+
+- (void)imagePickerController:(UIImagePickerController *)picker
+didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> *)info {
+    UIImage *image = info[UIImagePickerControllerOriginalImage];
+    [picker dismissViewControllerAnimated:YES completion:nil];
+
+    void (^c)(UIImage *) = _completion;
+    _completion = nil;
+    _presentingVC = nil;
+    if (image && c) c(image);
+}
+
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    _completion = nil;
+    _presentingVC = nil;
+}
+
+@end
+
+// =====================================================================
 // MARK: - Tạo QR image từ code (CIQRCodeGenerator, không dùng method app)
 // =====================================================================
 
